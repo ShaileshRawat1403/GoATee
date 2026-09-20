@@ -250,32 +250,38 @@ The foundation is working:
 Bounded handoff and minimality comparison are working:
 `goatee handoff <change-id>` and deterministic Build Budget comparison.
 
-Phase 2 provides:
-* portable, model-agnostic handoff rendered strictly to stdout
-* zero persistent artifacts created by handoff
-* strict gate requiring `APPROVED` statuses and locked `Baseline-Commit`
-* deterministic changed-file comparison against approved `Expected Surface`
-* detection of touches to protected `Blast Radius` paths
-* recursive directory prefix matching without glob mini-languages
-* complete isolation of `.goatee/**` control plane from delivery surface
+### Phase 3 ✓
+
+Deterministic verification and delivery receipt generation are working:
+`goatee verify <change-id>` and finalized delivery snapshots (`receipt.md`).
+
+Phase 3 provides:
+* strict pre-verification gate requiring a completely clean Git-visible working tree
+* single authoritative `Verified-Commit` captured directly from `HEAD`
+* Build Budget gate: unapproved surface deviations or protected changes block execution immediately
+* execution of declared automated acceptance criteria supporting narrow `exit N` grammar
+* safe command execution via `shlex.split` and `shell=False` without shell pipeline vulnerabilities
+* Git-visible state fingerprinting (`path`, `porcelain_code`, `sha256_hash`) before and after each command
+* halt on mutation: verification stops immediately if repository state is altered, marking subsequent ACs `NOT_RUN`
+* honest manual evidence representation (`Pending human review` -> `NEEDS_REVIEW`)
+* finalized delivery snapshot compiled to `.goatee/changes/<change-id>/receipt.md`
+* bounded diagnostic excerpts without terminal output bloat
 * zero external runtime dependencies
 
 Current test result:
 
 ```text
-20 tests
-20 passed
+28 tests
+28 passed
 0 errors
 ```
 
 ### Next
 
 ```text
-Phase 3
-Evidence verification
-Deviation tracking
-Delivery receipt (receipt.md)
-Dogfooding completion
+GoATee v0.1 complete!
+The core triad is fully operational:
+Agree exactly (Phase 1) -> Build minimally (Phase 2) -> Prove delivery (Phase 3).
 ```
 
 ---

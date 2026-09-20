@@ -269,6 +269,92 @@ def cmd_handoff(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Execute deterministic verification and compile delivery receipt.md."""
+    try:
+        validate_change_id(args.change_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    cwd = Path.cwd()
+    change_dir = cwd / ".goatee" / "changes" / args.change_id
+    change_file = change_dir / "change.md"
+
+    if not change_file.is_file():
+        print(f"Error: Change contract not found at {change_file}", file=sys.stderr)
+        return 1
+
+    # 1. Pre-Check: Check valid Git repository
+    res = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True, cwd=cwd)
+    if res.returncode != 0 or res.stdout.strip() != "true":
+        print("Error: Not inside a valid Git repository.", file=sys.stderr)
+        return 1
+
+    # 2. Pre-Check: Require completely clean Git-visible working tree (including current change.md)
+    status_res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=cwd)
+    if status_res.returncode != 0:
+        print("Error: Failed to inspect git status.", file=sys.stderr)
+        return 1
+
+    uncommitted = [line for line in status_res.stdout.splitlines() if line.strip()]
+    if uncommitted:
+        print(
+            "VERIFICATION BLOCKED: Working tree must be clean. "
+            "Commit the delivered implementation and governing change contract before verification.\n"
+            "Uncommitted changes:\n" +
+            "\n".join(f"  {c}" for c in uncommitted),
+            file=sys.stderr
+        )
+        return 1
+
+    # 3. Pre-Check: Contract must be approved and have a baseline commit
+    contract = parse_change_contract(change_file)
+    if contract.contract_state.agreement_status != "APPROVED":
+        print(
+            f"Error: Agreement-Status is '{contract.contract_state.agreement_status}', "
+            "must be 'APPROVED' before verification.",
+            file=sys.stderr
+        )
+        return 1
+
+    if contract.contract_state.budget_status != "APPROVED":
+        print(
+            f"Error: Budget-Status is '{contract.contract_state.budget_status}', "
+            "must be 'APPROVED' before verification.",
+            file=sys.stderr
+        )
+        return 1
+
+    if not contract.contract_state.baseline_commit:
+        print(
+            "Error: Change has no Baseline-Commit recorded. "
+            f"Run 'goatee approve {args.change_id}' before verification.",
+            file=sys.stderr
+        )
+        return 1
+
+    # 4. Run Verification Engine
+    from goatee.core.verifier import verify_change, render_receipt_markdown
+    try:
+        result = verify_change(contract, cwd)
+    except ValueError as ve:
+        print(f"Error in evidence declarations: {ve}", file=sys.stderr)
+        return 1
+
+    # 5. Write receipt.md
+    template_path = Path(__file__).parent / "templates" / "receipt.md"
+    receipt_content = render_receipt_markdown(result, template_path)
+    receipt_file = change_dir / "receipt.md"
+    receipt_file.write_text(receipt_content, encoding="utf-8")
+
+    print(f"Verification complete for '{args.change_id}'.")
+    print(f"Verdict: {result.verdict}")
+    print(f"Delivery receipt compiled at {receipt_file}")
+
+    return 0 if result.verdict == "PASS" else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="goatee",
@@ -294,6 +380,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_handoff = subparsers.add_parser("handoff", help="Render portable handoff contract to stdout")
     p_handoff.add_argument("change_id", help="Identifier of the change to hand off")
     p_handoff.set_defaults(func=cmd_handoff)
+
+    # verify
+    p_verify = subparsers.add_parser("verify", help="Execute deterministic verification and compile receipt.md")
+    p_verify.add_argument("change_id", help="Identifier of the change to verify")
+    p_verify.set_defaults(func=cmd_verify)
 
     return parser
 

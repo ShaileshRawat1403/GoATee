@@ -272,6 +272,157 @@ class TestCLI(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    def test_verify_blocks_dirty_worktree_cases(self):
+        """AC-01: Verification blocks if working tree contains any uncommitted Git-visible changes.
+        Tests:
+        1. uncommitted application file blocks
+        2. uncommitted change.md blocks
+        3. untracked file in change directory blocks
+        4. completely clean repository proceeds
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "code.py").write_text("print('test')", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-feat"]).func(parser.parse_args(["new", "001-feat"]))
+                c_file = p / ".goatee" / "changes" / "001-feat" / "change.md"
+
+                # Setup simple passing criterion
+                content = c_file.read_text(encoding="utf-8")
+                simple_ac = (
+                    "## Acceptance Criteria\n\n"
+                    "- AC-01: Exit check\n"
+                    "  Evidence:\n"
+                    "    type: automated\n"
+                    "    command: python3 -c 'exit(0)'\n"
+                    "    expected: exit 0\n\n"
+                )
+                content = content.replace("## Acceptance Criteria\n\n- AC-01: <description>\n  Evidence:\n    type: automated\n    command: <test command>\n    expected: exit 0\n\n- AC-02: <description>\n  Evidence:\n    type: manual\n    instruction: <what to observe>\n\n", simple_ac)
+                c_file.write_text(content, encoding="utf-8")
+
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                update_contract_state(c_file, "Budget-Status", "APPROVED")
+                parser.parse_args(["approve", "001-feat"]).func(parser.parse_args(["approve", "001-feat"]))
+
+                # CASE 2: change.md was modified by approve, so it is uncommitted!
+                # Must block verification because governing contract is uncommitted!
+                rc_contract_dirty = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+                self.assertEqual(rc_contract_dirty, 1)
+
+                # Now commit change.md
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "Commit approved contract"], check=True, capture_output=True)
+
+                # CASE 1: uncommitted application file blocks verification
+                (p / "dirty_app.py").write_text("x = 1", encoding="utf-8")
+                rc_app_dirty = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+                self.assertEqual(rc_app_dirty, 1)
+                (p / "dirty_app.py").unlink()
+
+                # CASE 3: untracked file inside change directory blocks verification
+                change_dir = p / ".goatee" / "changes" / "001-feat"
+                (change_dir / "stray.txt").write_text("stray file", encoding="utf-8")
+                rc_change_untracked = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+                self.assertEqual(rc_change_untracked, 1)
+                (change_dir / "stray.txt").unlink()
+
+                # CASE 4: completely clean repository proceeds to verification
+                rc_clean = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+                self.assertEqual(rc_clean, 0)
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_verify_blocks_unapproved_or_missing_baseline(self):
+        """AC-02: Verification blocks if change has no Baseline-Commit or is in DRAFT."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "code.py").write_text("print('test')", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-feat"]).func(parser.parse_args(["new", "001-feat"]))
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "scaffold"], check=True, capture_output=True)
+
+                # Change is still in DRAFT
+                rc = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+                self.assertEqual(rc, 1)
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_verify_generates_receipt_md(self):
+        """AC-07: Verification generates complete receipt.md with bounded diagnostics and verdict."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "code.py").write_text("print('test')", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-feat"]).func(parser.parse_args(["new", "001-feat"]))
+                c_file = p / ".goatee" / "changes" / "001-feat" / "change.md"
+
+                # Setup simple passing criterion in change.md
+                content = c_file.read_text(encoding="utf-8")
+                simple_ac = (
+                    "## Acceptance Criteria\n\n"
+                    "- AC-01: Simple exit check\n"
+                    "  Evidence:\n"
+                    "    type: automated\n"
+                    "    command: python3 -c 'exit(0)'\n"
+                    "    expected: exit 0\n\n"
+                )
+                content = content.replace("## Acceptance Criteria\n\n- AC-01: <description>\n  Evidence:\n    type: automated\n    command: <test command>\n    expected: exit 0\n\n- AC-02: <description>\n  Evidence:\n    type: manual\n    instruction: <what to observe>\n\n", simple_ac)
+                c_file.write_text(content, encoding="utf-8")
+
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                update_contract_state(c_file, "Budget-Status", "APPROVED")
+                parser.parse_args(["approve", "001-feat"]).func(parser.parse_args(["approve", "001-feat"]))
+
+                # Commit everything so worktree is clean
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "Deliver change and contract"], check=True, capture_output=True)
+
+                # Execute verify
+                rc = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+                self.assertEqual(rc, 0)
+
+                receipt_file = p / ".goatee" / "changes" / "001-feat" / "receipt.md"
+                self.assertTrue(receipt_file.is_file())
+                receipt_text = receipt_file.read_text(encoding="utf-8")
+                self.assertIn("Delivery Receipt: 001-feat", receipt_text)
+                self.assertIn("Verdict: PASS", receipt_text)
+                self.assertIn("Baseline-Commit:", receipt_text)
+                self.assertIn("Verified-Commit:", receipt_text)
+                self.assertIn("AC-01", receipt_text)
+            finally:
+                os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()
