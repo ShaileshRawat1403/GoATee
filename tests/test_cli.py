@@ -148,6 +148,130 @@ class TestCLI(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    def test_handoff_command_success(self):
+        """AC-01: An approved change can be rendered as a portable handoff to stdout."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                # Setup git & contract
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "app.txt").write_text("code", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-csv"]).func(parser.parse_args(["new", "001-csv"]))
+                c_file = p / ".goatee" / "changes" / "001-csv" / "change.md"
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                update_contract_state(c_file, "Budget-Status", "APPROVED")
+                parser.parse_args(["approve", "001-csv"]).func(parser.parse_args(["approve", "001-csv"]))
+
+                # Capture stdout
+                import io
+                from unittest.mock import patch
+
+                with patch("sys.stdout", new=io.StringIO()) as fake_out:
+                    rc = parser.parse_args(["handoff", "001-csv"]).func(parser.parse_args(["handoff", "001-csv"]))
+                    output = fake_out.getvalue()
+
+                self.assertEqual(rc, 0)
+                self.assertIn("GOATEE HANDOFF", output)
+                self.assertIn("Change: 001-csv", output)
+                self.assertIn("Baseline-Commit:", output)
+                self.assertIn("ACCEPTANCE CRITERIA", output)
+                self.assertIn("APPROVED BUILD BUDGET", output)
+                self.assertIn("IMPLEMENTATION RULES", output)
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_handoff_creates_no_persistent_artifact(self):
+        """AC-02: handoff creates no persistent artifact on disk."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "app.txt").write_text("code", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-csv"]).func(parser.parse_args(["new", "001-csv"]))
+                c_file = p / ".goatee" / "changes" / "001-csv" / "change.md"
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                update_contract_state(c_file, "Budget-Status", "APPROVED")
+                parser.parse_args(["approve", "001-csv"]).func(parser.parse_args(["approve", "001-csv"]))
+
+                # Snapshot all files and mod times before handoff
+                def get_dir_snapshot(dir_path: Path):
+                    return sorted([str(f.relative_to(dir_path)) for f in dir_path.rglob("*")])
+
+                files_before = get_dir_snapshot(p)
+
+                # Run handoff
+                import io
+                from unittest.mock import patch
+                with patch("sys.stdout", new=io.StringIO()):
+                    rc = parser.parse_args(["handoff", "001-csv"]).func(parser.parse_args(["handoff", "001-csv"]))
+
+                self.assertEqual(rc, 0)
+                files_after = get_dir_snapshot(p)
+                self.assertEqual(files_before, files_after)
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_handoff_refuses_draft(self):
+        """AC-03: handoff refuses a DRAFT agreement or budget."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-csv"]).func(parser.parse_args(["new", "001-csv"]))
+
+                # Agreement and budget are DRAFT
+                rc = parser.parse_args(["handoff", "001-csv"]).func(parser.parse_args(["handoff", "001-csv"]))
+                self.assertEqual(rc, 1)
+
+                # Agreement APPROVED but budget DRAFT
+                c_file = p / ".goatee" / "changes" / "001-csv" / "change.md"
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                rc_half = parser.parse_args(["handoff", "001-csv"]).func(parser.parse_args(["handoff", "001-csv"]))
+                self.assertEqual(rc_half, 1)
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_handoff_refuses_missing_baseline(self):
+        """AC-04: handoff refuses a change without Baseline-Commit."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-csv"]).func(parser.parse_args(["new", "001-csv"]))
+                c_file = p / ".goatee" / "changes" / "001-csv" / "change.md"
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                update_contract_state(c_file, "Budget-Status", "APPROVED")
+                # Baseline is still missing
+
+                rc = parser.parse_args(["handoff", "001-csv"]).func(parser.parse_args(["handoff", "001-csv"]))
+                self.assertEqual(rc, 1)
+            finally:
+                os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

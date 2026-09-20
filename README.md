@@ -243,47 +243,39 @@ GoATee is under active development.
 ### Phase 1 ✓
 
 The foundation is working:
+`goatee init`, `goatee new <change-id>`, `goatee approve <change-id>`.
 
-```text
-goatee init
-goatee new <change-id>
-goatee approve <change-id>
-```
+### Phase 2 ✓
 
-Phase 1 currently provides:
+Bounded handoff and minimality comparison are working:
+`goatee handoff <change-id>` and deterministic Build Budget comparison.
 
+Phase 2 provides:
+* portable, model-agnostic handoff rendered strictly to stdout
+* zero persistent artifacts created by handoff
+* strict gate requiring `APPROVED` statuses and locked `Baseline-Commit`
+* deterministic changed-file comparison against approved `Expected Surface`
+* detection of touches to protected `Blast Radius` paths
+* recursive directory prefix matching without glob mini-languages
+* complete isolation of `.goatee/**` control plane from delivery surface
 * zero external runtime dependencies
-* Python standard library implementation
-* project initialization
-* change-contract scaffolding
-* safe change-ID validation
-* structured acceptance criteria
-* Build Budget structure
-* approval gates
-* clean-working-tree checks
-* Git baseline commit locking
-* open-source provenance tracking
-* unit-tested CLI behaviour
 
 Current test result:
 
 ```text
-10 tests
-10 passed
+20 tests
+20 passed
 0 errors
 ```
 
 ### Next
 
 ```text
-Phase 2
-Build Budget comparison
-Portable agent handoff
-
 Phase 3
 Evidence verification
 Deviation tracking
-Delivery receipt
+Delivery receipt (receipt.md)
+Dogfooding completion
 ```
 
 ---

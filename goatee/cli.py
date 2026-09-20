@@ -154,6 +154,121 @@ def cmd_approve(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_handoff(args: argparse.Namespace) -> int:
+    """Render portable, model-agnostic handoff contract to stdout."""
+    try:
+        validate_change_id(args.change_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    cwd = Path.cwd()
+    change_file = cwd / ".goatee" / "changes" / args.change_id / "change.md"
+
+    if not change_file.is_file():
+        print(f"Error: Change contract not found at {change_file}", file=sys.stderr)
+        return 1
+
+    contract = parse_change_contract(change_file)
+
+    if contract.contract_state.agreement_status != "APPROVED":
+        print(
+            f"Error: Agreement-Status is '{contract.contract_state.agreement_status}', "
+            "must be 'APPROVED' before handoff.",
+            file=sys.stderr
+        )
+        return 1
+
+    if contract.contract_state.budget_status != "APPROVED":
+        print(
+            f"Error: Budget-Status is '{contract.contract_state.budget_status}', "
+            "must be 'APPROVED' before handoff.",
+            file=sys.stderr
+        )
+        return 1
+
+    if not contract.contract_state.baseline_commit:
+        print(
+            "Error: Change has no Baseline-Commit recorded. "
+            f"Run 'goatee approve {args.change_id}' before handoff.",
+            file=sys.stderr
+        )
+        return 1
+
+    # Extract Intent, Scope, and Project Constraints directly from the files
+    content = change_file.read_text(encoding="utf-8")
+
+    def extract_section(section_header: str, end_headers: list[str], text: str) -> str:
+        idx = text.find(section_header)
+        if idx == -1:
+            return ""
+        sub = text[idx + len(section_header):]
+        closest_end = len(sub)
+        for eh in end_headers:
+            e_idx = sub.find(eh)
+            if e_idx != -1 and e_idx < closest_end:
+                closest_end = e_idx
+        return sub[:closest_end].strip()
+
+    intent_text = extract_section("## Intent", ["## Agreed Scope", "## Acceptance Criteria"], content)
+    scope_in_text = extract_section("### In Scope", ["### Out of Scope", "## Acceptance Criteria"], content)
+    scope_out_text = extract_section("### Out of Scope", ["## Acceptance Criteria", "## Build Budget"], content)
+
+    # Format Acceptance Criteria
+    ac_lines = []
+    for ac in contract.acceptance_criteria:
+        ac_lines.append(f"- {ac.id}: {ac.description}")
+        ac_lines.append("  Evidence:")
+        ac_lines.append(f"    type: {ac.evidence_type}")
+        if ac.evidence_type == "automated":
+            if ac.command:
+                ac_lines.append(f"    command: {ac.command}")
+            if ac.expected:
+                ac_lines.append(f"    expected: {ac.expected}")
+        elif ac.evidence_type == "manual":
+            if ac.instruction:
+                ac_lines.append(f"    instruction: {ac.instruction}")
+        ac_lines.append("")
+    ac_formatted = "\n".join(ac_lines).strip()
+
+    # Format Build Budget
+    budget = contract.build_budget
+    expected_surf = "\n".join(f"- {s}" for s in (budget.expected_surface if budget else [])) or "- (none declared)"
+    reuse_strat = "\n".join(f"- {r}" for r in (budget.reuse_strategy if budget else [])) or "- (none declared)"
+    dep_policy = (budget.dependency_policy if budget and budget.dependency_policy else "No new runtime dependencies")
+    blast_rad = "\n".join(f"- {b}" for b in (budget.blast_radius if budget else [])) or "- (none declared)"
+
+    # Read project constraints if project.md exists
+    project_file = cwd / ".goatee" / "project.md"
+    project_constraints = ""
+    if project_file.is_file():
+        proj_content = project_file.read_text(encoding="utf-8")
+        project_constraints = extract_section("## Permanent Constraints", ["## "], proj_content)
+    if not project_constraints:
+        project_constraints = "- Standard library only at runtime; no external runtime dependencies."
+
+    # Load handoff template
+    template_path = Path(__file__).parent / "templates" / "handoff.md"
+    template_text = template_path.read_text(encoding="utf-8")
+
+    handoff_rendered = template_text.format(
+        change_id=contract.change_id,
+        baseline_commit=contract.contract_state.baseline_commit,
+        intent=intent_text or "(none declared)",
+        scope_in=scope_in_text or "- (none declared)",
+        scope_out=scope_out_text or "- (none declared)",
+        acceptance_criteria=ac_formatted or "(none declared)",
+        expected_surface=expected_surf,
+        reuse_strategy=reuse_strat,
+        dependency_policy=dep_policy,
+        blast_radius=blast_rad,
+        project_constraints=project_constraints,
+    )
+
+    sys.stdout.write(handoff_rendered + "\n")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="goatee",
@@ -174,6 +289,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_approve = subparsers.add_parser("approve", help="Lock baseline commit after human agreement and budget approval")
     p_approve.add_argument("change_id", help="Identifier of the change to approve")
     p_approve.set_defaults(func=cmd_approve)
+
+    # handoff
+    p_handoff = subparsers.add_parser("handoff", help="Render portable handoff contract to stdout")
+    p_handoff.add_argument("change_id", help="Identifier of the change to hand off")
+    p_handoff.set_defaults(func=cmd_handoff)
 
     return parser
 
