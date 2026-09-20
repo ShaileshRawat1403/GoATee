@@ -170,6 +170,27 @@ Not:
 
 ---
 
+## The I-7 Operating Model
+
+Behind GoATee's triad is the **I-7 Operating Model**—GoATee's human-centered change-control loop preventing AI coding agents from jumping from a vague request directly into unbounded implementation:
+
+```text
+AGREE EXACTLY
+  I-1 Intent     What are we actually trying to accomplish? (Business/user need)
+  I-2 Inform     What context, repo structure, and OSS exist? (Reality inspection)
+  I-3 Interpret  What are in/out-of-scope and the exact acceptance criteria?
+
+BUILD MINIMALLY
+  I-4 Initiate   Agent inspects repository and proposes the technical Build Budget
+  I-5 Inspect    HARD HUMAN GATE: Review & approve budget -> lock baseline commit
+  I-6 Intervene  Agent implements strictly within approved boundary; deviations loop back to I-5
+
+PROVE DELIVERY
+  I-7 Iterate    Verify declared evidence against actual diff & test results -> delivery receipt
+```
+
+---
+
 ## The artifact model
 
 GoATee deliberately keeps its persistent state small.
