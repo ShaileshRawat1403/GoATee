@@ -599,6 +599,139 @@ class TestCLI(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    def test_status_cli_error_handling(self):
+        """AC-05: Outside-project and missing-change errors are clean, non-zero, and traceback-free."""
+        parser = build_parser()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                # 1. Outside project
+                stderr_out = io.StringIO()
+                with patch("sys.stderr", stderr_out):
+                    rc = parser.parse_args(["status"]).func(parser.parse_args(["status"]))
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: Not a GoATee project", stderr_out.getvalue())
+                self.assertNotIn("Traceback", stderr_out.getvalue())
+
+                # Initialize project
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "t@test.com"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (Path(tmpdir) / "f.txt").write_text("ok", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+
+                # 2. Missing change ID
+                stderr_out = io.StringIO()
+                with patch("sys.stderr", stderr_out):
+                    rc = parser.parse_args(["status", "999-missing"]).func(parser.parse_args(["status", "999-missing"]))
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: Change '999-missing' not found.", stderr_out.getvalue())
+                self.assertNotIn("Traceback", stderr_out.getvalue())
+
+                # 3. Path traversal / invalid change ID
+                stderr_out = io.StringIO()
+                with patch("sys.stderr", stderr_out):
+                    rc = parser.parse_args(["status", "../bad"]).func(parser.parse_args(["status", "../bad"]))
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: Invalid change-id '../bad'", stderr_out.getvalue())
+                self.assertNotIn("Traceback", stderr_out.getvalue())
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_status_zero_side_effects(self):
+        """AC-07: status and status <id> have zero filesystem/Git side effects on clean and dirty repos."""
+        import hashlib
+        parser = build_parser()
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "t@test.com"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "app.py").write_text("x = 1\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-feat"]).func(parser.parse_args(["new", "001-feat"]))
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "add 001-feat"], check=True, capture_output=True)
+
+                def get_tree_snapshot():
+                    head = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+                    porcelain = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True).stdout
+                    index_diff = subprocess.run(["git", "diff", "--cached", "--binary"], capture_output=True).stdout
+                    ls_stage = subprocess.run(["git", "ls-files", "--stage"], capture_output=True, text=True).stdout
+                    file_hashes = {}
+                    for root, _, files in os.walk(p):
+                        if ".git" in root:
+                            continue
+                        for f in files:
+                            fpath = Path(root) / f
+                            file_hashes[str(fpath.relative_to(p))] = hashlib.sha256(fpath.read_bytes()).hexdigest()
+                    return {
+                        "head": head,
+                        "porcelain": porcelain,
+                        "index_diff": hashlib.sha256(index_diff).hexdigest(),
+                        "ls_stage": ls_stage,
+                        "file_hashes": file_hashes,
+                    }
+
+                # --- Subcase A: CLEAN repository ---
+                snap_clean_before = get_tree_snapshot()
+
+                stdout_clean_all = io.StringIO()
+                with patch("sys.stdout", stdout_clean_all):
+                    rc = parser.parse_args(["status"]).func(parser.parse_args(["status"]))
+                self.assertEqual(rc, 0)
+                self.assertIn("Working Tree: CLEAN", stdout_clean_all.getvalue())
+
+                stdout_clean_detail = io.StringIO()
+                with patch("sys.stdout", stdout_clean_detail):
+                    rc = parser.parse_args(["status", "001-feat"]).func(parser.parse_args(["status", "001-feat"]))
+                self.assertEqual(rc, 0)
+                self.assertIn("Working Tree: CLEAN", stdout_clean_detail.getvalue())
+
+                snap_clean_after = get_tree_snapshot()
+                self.assertEqual(snap_clean_before, snap_clean_after)
+
+                # --- Subcase B: Deliberately DIRTY repository ---
+                # 1. Modify tracked file and stage it
+                (p / "app.py").write_text("x = 2 (dirty modified)\n", encoding="utf-8")
+                subprocess.run(["git", "add", "app.py"], check=True)
+                # 2. Create untracked file
+                (p / "untracked.txt").write_text("dirty untracked\n", encoding="utf-8")
+
+                snap_dirty_before = get_tree_snapshot()
+                self.assertTrue(len(snap_dirty_before["porcelain"].strip()) > 0)
+
+                stdout_dirty_all = io.StringIO()
+                with patch("sys.stdout", stdout_dirty_all):
+                    rc = parser.parse_args(["status"]).func(parser.parse_args(["status"]))
+                self.assertEqual(rc, 0)
+                self.assertIn("Working Tree: DIRTY", stdout_dirty_all.getvalue())
+
+                stdout_dirty_detail = io.StringIO()
+                with patch("sys.stdout", stdout_dirty_detail):
+                    rc = parser.parse_args(["status", "001-feat"]).func(parser.parse_args(["status", "001-feat"]))
+                self.assertEqual(rc, 0)
+                self.assertIn("Working Tree: DIRTY", stdout_dirty_detail.getvalue())
+
+                snap_dirty_after = get_tree_snapshot()
+                self.assertEqual(snap_dirty_before, snap_dirty_after)
+                # Specifically verify index diff hash and ls-files were completely unchanged
+                self.assertEqual(snap_dirty_before["index_diff"], snap_dirty_after["index_diff"])
+                self.assertEqual(snap_dirty_before["ls_stage"], snap_dirty_after["ls_stage"])
+                self.assertEqual((p / "app.py").read_text(encoding="utf-8"), "x = 2 (dirty modified)\n")
+                self.assertEqual((p / "untracked.txt").read_text(encoding="utf-8"), "dirty untracked\n")
+            finally:
+                os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -378,6 +378,56 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return 0 if result.verdict == "PASS" else 1
 
 
+def cmd_status(args: argparse.Namespace) -> int:
+    """Display GoATee project overview or detailed change status."""
+    from goatee.core.status import (
+        find_project_root,
+        get_project_status,
+        format_project_overview,
+        get_change_report,
+        format_change_detail,
+        get_working_tree_state,
+        resolve_current_head,
+        ControlStateError,
+        ReceiptSyntaxError,
+    )
+
+    try:
+        root = find_project_root()
+    except ControlStateError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if args.change_id:
+        try:
+            validate_change_id(args.change_id)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+        try:
+            working_tree = get_working_tree_state(root)
+            current_head = resolve_current_head(root)
+            change_report = get_change_report(root, args.change_id, working_tree, current_head)
+            contract_path = root / ".goatee" / "changes" / args.change_id / "change.md"
+            contract = parse_change_contract(contract_path) if contract_path.is_file() else None
+            output = format_change_detail(change_report, contract)
+            print(output)
+            return 0
+        except (ControlStateError, ReceiptSyntaxError, ContractSyntaxError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+    else:
+        try:
+            project_report = get_project_status(root)
+            output = format_project_overview(project_report)
+            print(output)
+            return 0
+        except (ControlStateError, ReceiptSyntaxError, ContractSyntaxError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="goatee",
@@ -408,6 +458,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify = subparsers.add_parser("verify", help="Execute deterministic verification and compile receipt.md")
     p_verify.add_argument("change_id", help="Identifier of the change to verify")
     p_verify.set_defaults(func=cmd_verify)
+
+    # status
+    p_status = subparsers.add_parser("status", help="Show GoATee project or change status")
+    p_status.add_argument("change_id", nargs="?", help="Optional change ID to inspect in detail")
+    p_status.set_defaults(func=cmd_status)
 
     return parser
 
