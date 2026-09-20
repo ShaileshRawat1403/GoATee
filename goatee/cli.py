@@ -5,7 +5,8 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from goatee.core.parser import parse_change_contract, update_contract_state
+from goatee.core.parser import parse_change_contract, update_contract_state, ContractSyntaxError
+from goatee.core.budget import GitInspectionError
 
 
 SAFE_CHANGE_ID_REGEX = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
@@ -125,7 +126,11 @@ def cmd_approve(args: argparse.Namespace) -> int:
         return 1
 
     # 4. Parse contract and verify Agreement & Budget statuses
-    contract = parse_change_contract(change_file)
+    try:
+        contract = parse_change_contract(change_file)
+    except ContractSyntaxError as cse:
+        print(f"Contract syntax error:\n{cse}", file=sys.stderr)
+        return 1
     if contract.contract_state.baseline_commit:
         print(
             f"Error: Change '{args.change_id}' already has a baseline commit: "
@@ -169,7 +174,11 @@ def cmd_handoff(args: argparse.Namespace) -> int:
         print(f"Error: Change contract not found at {change_file}", file=sys.stderr)
         return 1
 
-    contract = parse_change_contract(change_file)
+    try:
+        contract = parse_change_contract(change_file)
+    except ContractSyntaxError as cse:
+        print(f"Contract syntax error:\n{cse}", file=sys.stderr)
+        return 1
 
     if contract.contract_state.agreement_status != "APPROVED":
         print(
@@ -291,10 +300,16 @@ def cmd_verify(args: argparse.Namespace) -> int:
         print("Error: Not inside a valid Git repository.", file=sys.stderr)
         return 1
 
+    # Check candidate HEAD commit exists (initial HEAD resolution fails closed)
+    head_res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=cwd)
+    if head_res.returncode != 0 or not head_res.stdout.strip():
+        print(f"GIT INSPECTION FAILED:\nUnable to resolve HEAD: {head_res.stderr.strip()}", file=sys.stderr)
+        return 1
+
     # 2. Pre-Check: Require completely clean Git-visible working tree (including current change.md)
-    status_res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=cwd)
+    status_res = subprocess.run(["git", "status", "--porcelain=v1"], capture_output=True, text=True, cwd=cwd)
     if status_res.returncode != 0:
-        print("Error: Failed to inspect git status.", file=sys.stderr)
+        print(f"GIT INSPECTION FAILED:\ngit status failed: {status_res.stderr.strip()}", file=sys.stderr)
         return 1
 
     uncommitted = [line for line in status_res.stdout.splitlines() if line.strip()]
@@ -309,7 +324,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         return 1
 
     # 3. Pre-Check: Contract must be approved and have a baseline commit
-    contract = parse_change_contract(change_file)
+    try:
+        contract = parse_change_contract(change_file)
+    except ContractSyntaxError as cse:
+        print(f"Contract syntax error:\n{cse}", file=sys.stderr)
+        return 1
+
     if contract.contract_state.agreement_status != "APPROVED":
         print(
             f"Error: Agreement-Status is '{contract.contract_state.agreement_status}', "
@@ -338,6 +358,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
     from goatee.core.verifier import verify_change, render_receipt_markdown
     try:
         result = verify_change(contract, cwd)
+    except GitInspectionError as gie:
+        print(f"GIT INSPECTION FAILED:\n{gie}", file=sys.stderr)
+        return 1
     except ValueError as ve:
         print(f"Error in evidence declarations: {ve}", file=sys.stderr)
         return 1

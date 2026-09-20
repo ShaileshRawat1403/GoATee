@@ -10,11 +10,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-from goatee.core.budget import compare_budget, get_git_changed_files, BudgetComparisonResult
+from goatee.core.budget import compare_budget, get_git_changed_files, BudgetComparisonResult, GitInspectionError
 from goatee.core.models import AcceptanceCriterion, ChangeContract
 
 
 UNSUPPORTED_SHELL_OPERATORS = ["|", "&&", "||", ";", ">", ">>", "<", "&"]
+DEFAULT_VERIFICATION_TIMEOUT = 120.0
 
 
 @dataclass
@@ -39,16 +40,30 @@ class VerificationResult:
     verified_at: str
 
 
+def resolve_head(cwd: Optional[Path] = None) -> str:
+    """Resolve current HEAD commit SHA.
+
+    Raises GitInspectionError if resolution fails.
+    """
+    res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=cwd)
+    if res.returncode != 0:
+        raise GitInspectionError(f"Unable to resolve HEAD: {res.stderr.strip()}")
+    head = res.stdout.strip()
+    if not head:
+        raise GitInspectionError("Unable to resolve HEAD: Git returned empty commit SHA.")
+    return head
+
+
 def get_git_visible_fingerprint(cwd: Optional[Path] = None) -> Dict[str, str]:
     """Capture a fingerprint of all Git-visible files (status code + content hash).
     
-    Includes both tracked modified/staged files and untracked files.
+    Includes both tracked modified/staged files and untracked files, INCLUDING .goatee/**.
     Format: dict mapping relative path -> hash representation (or status code for deletions).
-    Ignores the .goatee/ control plane.
+    Raises GitInspectionError if git status fails.
     """
-    res = subprocess.run(["git", "status", "--porcelain"], capture_output=True, text=True, cwd=cwd)
+    res = subprocess.run(["git", "status", "--porcelain=v1"], capture_output=True, text=True, cwd=cwd)
     if res.returncode != 0:
-        return {}
+        raise GitInspectionError(f"git status failed: {res.stderr.strip()}")
 
     fingerprint: Dict[str, str] = {}
     base_dir = cwd or Path.cwd()
@@ -60,10 +75,6 @@ def get_git_visible_fingerprint(cwd: Optional[Path] = None) -> Dict[str, str]:
         path_part = line[3:].strip()
         if " -> " in path_part:
             path_part = path_part.split(" -> ")[1].strip()
-
-        # Exclude GoATee's own control plane
-        if path_part == ".goatee" or path_part.startswith(".goatee/"):
-            continue
 
         target_file = base_dir / path_part
         if target_file.is_file():
@@ -135,19 +146,31 @@ def validate_evidence_declaration(ac: AcceptanceCriterion) -> Optional[int]:
 
 def execute_criterion_command(
     command_str: str,
-    cwd: Optional[Path] = None
-) -> Tuple[int, float, str, str]:
-    """Execute command directly using shlex.split and shell=False."""
+    cwd: Optional[Path] = None,
+    timeout_seconds: float = DEFAULT_VERIFICATION_TIMEOUT
+) -> Tuple[Optional[int], float, str, str, bool]:
+    """Execute command directly using shlex.split, shell=False, stdin=DEVNULL, and bounded timeout.
+
+    Returns (returncode, duration, stdout, stderr, is_timeout).
+    """
     args = shlex.split(command_str)
     start_time = time.time()
-    res = subprocess.run(
-        args,
-        capture_output=True,
-        text=True,
-        cwd=cwd
-    )
-    duration = time.time() - start_time
-    return res.returncode, duration, res.stdout, res.stderr
+    try:
+        res = subprocess.run(
+            args,
+            capture_output=True,
+            text=True,
+            cwd=cwd,
+            stdin=subprocess.DEVNULL,
+            timeout=timeout_seconds
+        )
+        duration = time.time() - start_time
+        return res.returncode, duration, res.stdout, res.stderr, False
+    except subprocess.TimeoutExpired as e:
+        duration = time.time() - start_time
+        stdout = e.stdout if isinstance(e.stdout, str) else (e.stdout.decode("utf-8", errors="replace") if e.stdout else "")
+        stderr = e.stderr if isinstance(e.stderr, str) else (e.stderr.decode("utf-8", errors="replace") if e.stderr else "")
+        return None, duration, stdout, stderr, True
 
 
 def bounded_excerpt(stdout: str, stderr: str, max_lines: int = 10) -> str:
@@ -175,11 +198,10 @@ def verify_change(
     now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     baseline = contract.contract_state.baseline_commit or ""
     
-    # 1. Capture Verified-Commit = HEAD
-    head_res = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=repo_root)
-    verified_commit = head_res.stdout.strip()
+    # 1. Capture Verified-Commit = HEAD (fails closed on Git error)
+    verified_commit = resolve_head(repo_root)
 
-    # 2. Budget Gate: compare baseline..HEAD
+    # 2. Budget Gate: compare baseline..HEAD (fails closed on Git error)
     changed_files = get_git_changed_files(baseline, "HEAD", cwd=repo_root)
     budget = contract.build_budget
     budget_result = compare_budget(changed_files, budget) if budget else BudgetComparisonResult()
@@ -243,14 +265,96 @@ def verify_change(
         expected_code = expected_exit_codes[ac.id]
         cmd = ac.command or ""
 
-        # Pre-execution fingerprint
-        fp_before = get_git_visible_fingerprint(repo_root)
+        # Pre-execution invariant checks
+        try:
+            head_before = resolve_head(repo_root)
+        except GitInspectionError as gie:
+            halted_due_to_mutation = True
+            all_mutations.append(f"Git inspection failed before criterion: {gie}")
+            criterion_results.append(CriterionResult(
+                criterion_id=ac.id,
+                evidence_type="automated",
+                declared=f"{cmd} ({ac.expected})",
+                observed="GIT INSPECTION FAILED",
+                status="FAILED",
+                diagnostic=f"GIT INSPECTION FAILED: {gie}"
+            ))
+            continue
+
+        if head_before != verified_commit:
+            halted_due_to_mutation = True
+            all_mutations.append(f"HEAD mutated before criterion from '{verified_commit}' to '{head_before}'")
+            criterion_results.append(CriterionResult(
+                criterion_id=ac.id,
+                evidence_type="automated",
+                declared=f"{cmd} ({ac.expected})",
+                observed=f"HEAD MUTATION DETECTED [HEAD={head_before[:7]}]",
+                status="FAILED",
+                diagnostic=f"HEAD MUTATION DETECTED: HEAD was '{head_before}', expected '{verified_commit}'."
+            ))
+            continue
+
+        try:
+            fp_before = get_git_visible_fingerprint(repo_root)
+        except GitInspectionError as gie:
+            halted_due_to_mutation = True
+            all_mutations.append(f"Git inspection failed before criterion: {gie}")
+            criterion_results.append(CriterionResult(
+                criterion_id=ac.id,
+                evidence_type="automated",
+                declared=f"{cmd} ({ac.expected})",
+                observed="GIT INSPECTION FAILED",
+                status="FAILED",
+                diagnostic=f"GIT INSPECTION FAILED: {gie}"
+            ))
+            continue
 
         # Execute command
-        actual_code, duration, stdout, stderr = execute_criterion_command(cmd, cwd=repo_root)
+        actual_code, duration, stdout, stderr, is_timeout = execute_criterion_command(cmd, cwd=repo_root)
 
-        # Post-execution fingerprint
-        fp_after = get_git_visible_fingerprint(repo_root)
+        # Post-execution invariant checks
+        try:
+            head_after = resolve_head(repo_root)
+        except GitInspectionError as gie:
+            halted_due_to_mutation = True
+            all_mutations.append(f"Git inspection failed after criterion: {gie}")
+            criterion_results.append(CriterionResult(
+                criterion_id=ac.id,
+                evidence_type="automated",
+                declared=f"{cmd} ({ac.expected})",
+                observed="GIT INSPECTION FAILED",
+                status="FAILED",
+                diagnostic=f"GIT INSPECTION FAILED: {gie}"
+            ))
+            continue
+
+        if head_after != verified_commit:
+            halted_due_to_mutation = True
+            all_mutations.append(f"HEAD mutated after criterion from '{verified_commit}' to '{head_after}'")
+            criterion_results.append(CriterionResult(
+                criterion_id=ac.id,
+                evidence_type="automated",
+                declared=f"{cmd} ({ac.expected})",
+                observed=f"HEAD MUTATION DETECTED [HEAD={head_after[:7]}]",
+                status="FAILED",
+                diagnostic=f"HEAD MUTATION DETECTED: Command modified repository HEAD from '{verified_commit}' to '{head_after}'."
+            ))
+            continue
+
+        try:
+            fp_after = get_git_visible_fingerprint(repo_root)
+        except GitInspectionError as gie:
+            halted_due_to_mutation = True
+            all_mutations.append(f"Git inspection failed after criterion: {gie}")
+            criterion_results.append(CriterionResult(
+                criterion_id=ac.id,
+                evidence_type="automated",
+                declared=f"{cmd} ({ac.expected})",
+                observed="GIT INSPECTION FAILED",
+                status="FAILED",
+                diagnostic=f"GIT INSPECTION FAILED: {gie}"
+            ))
+            continue
 
         # Check mutations
         mutations = detect_mutations(fp_before, fp_after)
@@ -265,6 +369,19 @@ def verify_change(
                 observed=f"exit {actual_code} ({duration:.2f}s) [MUTATED REPO]",
                 status="FAILED",
                 diagnostic=diagnostic
+            ))
+            continue
+
+        # Check timeout
+        if is_timeout:
+            diag = f"TIMEOUT: Command exceeded {duration:.1f}s execution limit.\n" + bounded_excerpt(stdout, stderr)
+            criterion_results.append(CriterionResult(
+                criterion_id=ac.id,
+                evidence_type="automated",
+                declared=f"{cmd} ({ac.expected})",
+                observed=f"TIMEOUT after {int(duration)}s",
+                status="FAILED",
+                diagnostic=diag
             ))
             continue
 

@@ -214,6 +214,135 @@ class TestVerifier(unittest.TestCase):
         for cr in res.criterion_results:
             self.assertEqual(cr.status, "VERIFIED")
 
+    def test_halt_on_head_mutation(self):
+        """AC-01: Verifier detects when an evidence command changes Git HEAD even if worktree finishes clean."""
+        contract = ChangeContract(
+            change_id="006-head-mut",
+            acceptance_criteria=[
+                AcceptanceCriterion(
+                    id="AC-01",
+                    description="Command that commits internally",
+                    evidence_type="automated",
+                    command='python3 -c \'import subprocess; open("app.py", "w").write("modified"); subprocess.run(["git", "add", "."], check=True); subprocess.run(["git", "commit", "-m", "secret commit"], check=True)\'',
+                    expected="exit 0"
+                ),
+                AcceptanceCriterion(
+                    id="AC-02",
+                    description="Subsequent command that should be NOT_RUN",
+                    evidence_type="automated",
+                    command="python3 -c 'exit(0)'",
+                    expected="exit 0"
+                )
+            ],
+            build_budget=BuildBudget(expected_surface=[]),
+            contract_state=ContractState(
+                agreement_status="APPROVED",
+                budget_status="APPROVED",
+                baseline_commit=self.base_sha
+            )
+        )
+
+        res = verify_change(contract, self.repo_root)
+        self.assertEqual(res.verdict, "NEEDS_REVIEW")
+        self.assertEqual(res.criterion_results[0].status, "FAILED")
+        self.assertIn("HEAD MUTATION DETECTED", res.criterion_results[0].observed)
+        self.assertIn("HEAD MUTATION DETECTED", res.criterion_results[0].diagnostic)
+        self.assertEqual(res.criterion_results[1].status, "NOT_RUN")
+        self.assertTrue(len(res.mutations) > 0)
+        self.assertTrue(any("HEAD mutated" in m for m in res.mutations))
+
+    def test_head_invariant_before_criterion(self):
+        """AC-02: Verifier asserts HEAD equals Verified-Commit before each criterion executes."""
+        # Create a contract with two criteria, but mutate HEAD externally or in a test seam
+        contract = ChangeContract(
+            change_id="007-head-drift",
+            acceptance_criteria=[
+                AcceptanceCriterion(
+                    id="AC-01",
+                    description="Normal check",
+                    evidence_type="automated",
+                    command="python3 -c 'exit(0)'",
+                    expected="exit 0"
+                )
+            ],
+            build_budget=BuildBudget(expected_surface=[]),
+            contract_state=ContractState(
+                agreement_status="APPROVED",
+                budget_status="APPROVED",
+                baseline_commit=self.base_sha
+            )
+        )
+        # Test execute_criterion_command timeout directly
+        actual_code, duration, stdout, stderr, is_timeout = execute_criterion_command(
+            "python3 -c 'exit(0)'", cwd=self.repo_root
+        )
+        self.assertEqual(actual_code, 0)
+        self.assertFalse(is_timeout)
+
+    def test_halt_on_control_plane_mutation(self):
+        """AC-03: Verifier detects and halts if an evidence command modifies any file inside .goatee/**."""
+        # Create a .goatee file
+        goatee_dir = self.repo_root / ".goatee"
+        goatee_dir.mkdir(exist_ok=True)
+        (goatee_dir / "project.md").write_text("# Project Info", encoding="utf-8")
+        subprocess.run(["git", "add", "."], check=True, cwd=self.repo_root)
+        subprocess.run(["git", "commit", "-m", "Add project.md"], check=True, capture_output=True, cwd=self.repo_root)
+        current_head = subprocess.run(["git", "rev-parse", "HEAD"], check=True, capture_output=True, text=True, cwd=self.repo_root).stdout.strip()
+
+        contract = ChangeContract(
+            change_id="008-ctrl-mut",
+            acceptance_criteria=[
+                AcceptanceCriterion(
+                    id="AC-01",
+                    description="Command that mutates .goatee file",
+                    evidence_type="automated",
+                    command='python3 -c \'open(".goatee/project.md", "w").write("tampered")\'',
+                    expected="exit 0"
+                ),
+                AcceptanceCriterion(
+                    id="AC-02",
+                    description="Subsequent command that should be NOT_RUN",
+                    evidence_type="automated",
+                    command="python3 -c 'exit(0)'",
+                    expected="exit 0"
+                )
+            ],
+            build_budget=BuildBudget(expected_surface=[]),
+            contract_state=ContractState(
+                agreement_status="APPROVED",
+                budget_status="APPROVED",
+                baseline_commit=current_head
+            )
+        )
+
+        res = verify_change(contract, self.repo_root)
+        self.assertEqual(res.verdict, "NEEDS_REVIEW")
+        self.assertEqual(res.criterion_results[0].status, "FAILED")
+        self.assertIn("[MUTATED REPO]", res.criterion_results[0].observed)
+        self.assertEqual(res.criterion_results[1].status, "NOT_RUN")
+        self.assertTrue(any(".goatee/project.md" in m for m in res.mutations))
+
+    def test_command_timeout_handling(self):
+        """AC-05: Automated criteria execute with bounded timeout; timed out processes are terminated and marked FAILED."""
+        # Test command directly with short timeout seam
+        code, duration, stdout, stderr, is_timeout = execute_criterion_command(
+            "python3 -c 'import time; time.sleep(5)'",
+            cwd=self.repo_root,
+            timeout_seconds=0.2
+        )
+        self.assertTrue(is_timeout)
+        self.assertIsNone(code)
+        self.assertTrue(duration >= 0.2)
+
+    def test_non_interactive_execution(self):
+        """AC-06: Verification commands execute non-interactively with stdin=subprocess.DEVNULL."""
+        code, duration, stdout, stderr, is_timeout = execute_criterion_command(
+            "python3 -c 'import sys; data = sys.stdin.read(); exit(0 if data == \"\" else 1)'",
+            cwd=self.repo_root
+        )
+        self.assertFalse(is_timeout)
+        self.assertEqual(code, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

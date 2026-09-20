@@ -1,10 +1,13 @@
 """Unit tests for the GoATee CLI commands: init, new, approve."""
 
+import io
 import os
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
+import goatee.core.verifier
 from goatee.cli import build_parser, validate_change_id
 from goatee.core.parser import parse_change_contract, update_contract_state
 
@@ -420,6 +423,179 @@ class TestCLI(unittest.TestCase):
                 self.assertIn("Baseline-Commit:", receipt_text)
                 self.assertIn("Verified-Commit:", receipt_text)
                 self.assertIn("AC-01", receipt_text)
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_git_inspection_fails_closed(self):
+        """AC-04: Git inspection operations fail closed across initial resolution, diff discovery, and in-flight checks."""
+        parser = build_parser()
+
+        # Subcase A: Initial HEAD resolution failure
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                # Repo has no commits, so git rev-parse HEAD fails
+                c_dir = p / ".goatee" / "changes" / "001-feat"
+                c_dir.mkdir(parents=True)
+                (c_dir / "change.md").write_text("dummy", encoding="utf-8")
+
+                stderr_capture = io.StringIO()
+                with patch("sys.stderr", stderr_capture):
+                    rc = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+
+                self.assertNotEqual(rc, 0)
+                err_output = stderr_capture.getvalue()
+                self.assertIn("GIT INSPECTION FAILED", err_output)
+                self.assertFalse((c_dir / "receipt.md").exists())
+            finally:
+                os.chdir(orig_cwd)
+
+        # Subcase B: Budget diff discovery failure
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "app.py").write_text("x = 1", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-feat"]).func(parser.parse_args(["new", "001-feat"]))
+                c_file = p / ".goatee" / "changes" / "001-feat" / "change.md"
+
+                content = c_file.read_text(encoding="utf-8")
+                simple_ac = (
+                    "## Acceptance Criteria\n\n"
+                    "- AC-01: Check\n"
+                    "  Evidence:\n"
+                    "    type: automated\n"
+                    "    command: python3 -c 'exit(0)'\n"
+                    "    expected: exit 0\n\n"
+                )
+                content = content.replace("## Acceptance Criteria\n\n- AC-01: <description>\n  Evidence:\n    type: automated\n    command: <test command>\n    expected: exit 0\n\n- AC-02: <description>\n  Evidence:\n    type: manual\n    instruction: <what to observe>\n\n", simple_ac)
+                c_file.write_text(content, encoding="utf-8")
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                update_contract_state(c_file, "Budget-Status", "APPROVED")
+                # Intentionally set an invalid non-existent baseline commit so git diff fails
+                update_contract_state(c_file, "Baseline-Commit", "deadbeef00000000000000000000000000000000")
+
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "deliver"], check=True, capture_output=True)
+
+                stderr_capture = io.StringIO()
+                with patch("sys.stderr", stderr_capture):
+                    rc = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+
+                self.assertNotEqual(rc, 0)
+                err_output = stderr_capture.getvalue()
+                self.assertIn("GIT INSPECTION FAILED", err_output)
+                self.assertFalse((p / ".goatee" / "changes" / "001-feat" / "receipt.md").exists())
+            finally:
+                os.chdir(orig_cwd)
+
+        # Subcase C: In-flight Git inspection failure
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "app.py").write_text("x = 1", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-feat"]).func(parser.parse_args(["new", "001-feat"]))
+                c_file = p / ".goatee" / "changes" / "001-feat" / "change.md"
+
+                content = c_file.read_text(encoding="utf-8")
+                simple_ac = (
+                    "## Acceptance Criteria\n\n"
+                    "- AC-01: In-flight fail\n"
+                    "  Evidence:\n"
+                    "    type: automated\n"
+                    "    command: python3 -c 'exit(0)'\n"
+                    "    expected: exit 0\n\n"
+                    "- AC-02: Next check\n"
+                    "  Evidence:\n"
+                    "    type: automated\n"
+                    "    command: python3 -c 'exit(0)'\n"
+                    "    expected: exit 0\n\n"
+                )
+                content = content.replace("## Acceptance Criteria\n\n- AC-01: <description>\n  Evidence:\n    type: automated\n    command: <test command>\n    expected: exit 0\n\n- AC-02: <description>\n  Evidence:\n    type: manual\n    instruction: <what to observe>\n\n", simple_ac)
+                c_file.write_text(content, encoding="utf-8")
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                update_contract_state(c_file, "Budget-Status", "APPROVED")
+                parser.parse_args(["approve", "001-feat"]).func(parser.parse_args(["approve", "001-feat"]))
+
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "deliver"], check=True, capture_output=True)
+
+                from goatee.core.budget import GitInspectionError
+                orig_fp = goatee.core.verifier.get_git_visible_fingerprint
+                call_count = [0]
+                def mocked_fp(cwd=None):
+                    call_count[0] += 1
+                    if call_count[0] == 2:  # Post-execution of AC-01
+                        raise GitInspectionError("Simulated in-flight git corruption")
+                    return orig_fp(cwd)
+
+                with patch("goatee.core.verifier.get_git_visible_fingerprint", side_effect=mocked_fp):
+                    rc = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+
+                self.assertEqual(rc, 1)  # NEEDS_REVIEW exits 1
+                receipt_file = p / ".goatee" / "changes" / "001-feat" / "receipt.md"
+                self.assertTrue(receipt_file.is_file())
+                receipt_text = receipt_file.read_text(encoding="utf-8")
+                self.assertIn("Verdict: NEEDS_REVIEW", receipt_text)
+                self.assertIn("GIT INSPECTION FAILED", receipt_text)
+                self.assertIn("AC-01", receipt_text)
+                self.assertIn("FAILED", receipt_text)
+                self.assertIn("NOT_RUN", receipt_text)
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_cli_syntax_error_clean_exit(self):
+        """Test that malformed contract syntax results in concise stderr and exit 1 with no traceback."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            parser = build_parser()
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "init.txt").write_text("hello", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-bad"]).func(parser.parse_args(["new", "001-bad"]))
+                c_file = p / ".goatee" / "changes" / "001-bad" / "change.md"
+
+                # Corrupt change.md: remove Contract State
+                content = c_file.read_text(encoding="utf-8").split("## Contract State")[0]
+                c_file.write_text(content, encoding="utf-8")
+
+                stderr_capture = io.StringIO()
+                with patch("sys.stderr", stderr_capture):
+                    rc = parser.parse_args(["approve", "001-bad"]).func(parser.parse_args(["approve", "001-bad"]))
+
+                self.assertEqual(rc, 1)
+                err_output = stderr_capture.getvalue()
+                self.assertIn("Contract syntax error:", err_output)
+                self.assertIn("Missing required section: '## Contract State'", err_output)
+                self.assertNotIn("Traceback", err_output)
             finally:
                 os.chdir(orig_cwd)
 
