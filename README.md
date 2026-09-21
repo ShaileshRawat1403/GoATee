@@ -4,14 +4,14 @@ archetype: project-readme
 status: active-development
 owner: Shailesh Rawat
 maintainer: Shailesh Rawat
-version: 0.1.0
+version: 0.2.0
 tags:
   - spec-driven-development
   - ai-assisted-development
   - forward-deployed
   - governance
   - evidence
-last_reviewed: 2026-09-20
+last_reviewed: 2026-09-21
 ---
 
 # GoATee
@@ -201,7 +201,8 @@ GoATee deliberately keeps its persistent state small.
 └── changes/
     └── <change-id>/
         ├── change.md
-        └── receipt.md
+        ├── receipt.md
+        └── review.md   # when human attestation exists
 ```
 
 ### `project.md`
@@ -217,7 +218,7 @@ permanent constraints
 
 ### `change.md`
 
-The agreement for one software change.
+The governing agreement for one software change.
 
 ```text
 intent
@@ -230,9 +231,27 @@ baseline commit
 
 ### `receipt.md`
 
-The evidence-backed delivery snapshot.
+The machine-generated evidence snapshot.
 
-This arrives with verification in a later v0.1 phase.
+```text
+verified commit
+coverage matrix
+surface deviations
+git mutations
+machine verdict
+```
+
+### `review.md`
+
+The receipt-bound attributed human review (when human attestation exists).
+
+```text
+receipt binding (commit & SHA-256)
+attestation coverage matrix
+dual-verdict resolution
+append-preserving event history
+Git-configured reviewer attribution
+```
 
 ---
 
@@ -240,48 +259,31 @@ This arrives with verification in a later v0.1 phase.
 
 GoATee is under active development.
 
-### Phase 1 ✓
+### v0.1 Foundation ✓
 
-The foundation is working:
-`goatee init`, `goatee new <change-id>`, `goatee approve <change-id>`.
+* **Phase 1**: Base foundation (`goatee init`, `goatee new <change-id>`, `goatee approve <change-id>`).
+* **Phase 2**: Bounded handoff & budget comparison (`goatee handoff <change-id>`).
+* **Phase 3**: Deterministic verification & machine delivery receipts (`goatee verify <change-id>`).
 
-### Phase 2 ✓
+### v0.2 Hardening, Inspection & Attestation ✓
 
-Bounded handoff and minimality comparison are working:
-`goatee handoff <change-id>` and deterministic Build Budget comparison.
-
-### Phase 3 ✓
-
-Deterministic verification and delivery receipt generation are working:
-`goatee verify <change-id>` and finalized delivery snapshots (`receipt.md`).
-
-Phase 3 provides:
-* strict pre-verification gate requiring a completely clean Git-visible working tree
-* single authoritative `Verified-Commit` captured directly from `HEAD`
-* Build Budget gate: unapproved surface deviations or protected changes block execution immediately
-* execution of declared automated acceptance criteria supporting narrow `exit N` grammar
-* safe command execution via `shlex.split` and `shell=False` without shell pipeline vulnerabilities
-* Git-visible state fingerprinting (`path`, `porcelain_code`, `sha256_hash`) before and after each command
-* halt on mutation: verification stops immediately if repository state is altered, marking subsequent ACs `NOT_RUN`
-* honest manual evidence representation (`Pending human review` -> `NEEDS_REVIEW`)
-* finalized delivery snapshot compiled to `.goatee/changes/<change-id>/receipt.md`
-* bounded diagnostic excerpts without terminal output bloat
-* zero external runtime dependencies
+* **004 — Proof Hardening**: Control-plane integrity safeguards, Git HEAD invariant enforcement, mutation halting, execution timeouts, DEVNULL stdin isolation, and rename-aware budget diffs.
+* **005 — Control Status**: Read-only control status (`goatee status`, `goatee status <change-id>`), separate contract/machine states, candidate vs. verified commit distinction, and working-tree cleanliness visibility without side effects.
+* **006 — Human Attestation**: Deterministic human attestation engine (`goatee attest`), receipt-bound review records (`review.md`), dual-verdict verification (`Machine Verdict` and `Human Review`), and Git-configured reviewer attribution without modifying historical machine receipts.
 
 Current test result:
 
 ```text
-28 tests
-28 passed
+56 tests
+56 passed
 0 errors
 ```
 
-### Next
+### Release Statement
 
 ```text
-GoATee v0.1 complete!
-The core triad is fully operational:
-Agree exactly (Phase 1) -> Build minimally (Phase 2) -> Prove delivery (Phase 3).
+GoATee v0.2 is released.
+The control layer provides end-to-end agreement, bounded implementation, hardened machine proof, and receipt-bound human attestation.
 ```
 
 ---
@@ -469,6 +471,59 @@ Repository state becomes evidence.
 
 ---
 
+## Inspect status
+
+`goatee status` provides read-only visibility into the control plane without modifying repository state or files:
+
+```bash
+# Repo-wide overview of all changes
+goatee status
+
+# Detailed view for a specific change
+goatee status 001-export-csv
+```
+
+Status reports the contract approval state, machine verification verdict, human review state, candidate commit, and whether the working tree is clean.
+
+---
+
+## Record human attestation
+
+When a change contains manual acceptance criteria or requires human sign-off, `goatee attest` records human attestation into a separate, receipt-bound review artifact:
+
+```bash
+goatee attest 001-export-csv --criterion AC-02 --verified --note "Export button verified beside Filters"
+```
+
+Attestation requires an existing machine receipt (`receipt.md`). It creates or appends to `.goatee/changes/<change-id>/review.md` without modifying `receipt.md`. Reviewer identity is attributed from local Git configuration (`user.name` and `user.email`).
+
+---
+
+## The dual-verdict model
+
+GoATee v0.2 maintains strict separation between machine proof and human judgment:
+
+* **Machine Verdict**: Deterministic output of automated command execution and budget diff checks (`PASS | NEEDS_REVIEW`).
+* **Human Review**: Recorded human attestation events (`PENDING | ACCEPTED | REJECTED`).
+
+`FAILED` is a criterion-level status (`VERIFIED`, `FAILED`, `NEEDS_REVIEW`, `NOT_RUN`), not an overall Machine Verdict.
+
+The boundaries are absolute:
+
+* Human review never rewrites the Machine Verdict.
+* Human attestation never alters receipt rows or turns `NEEDS_REVIEW` into machine `VERIFIED`.
+* Machine failure may block Human Review from becoming `ACCEPTED`.
+* Machine failure does not manufacture `Human Review: REJECTED` (only an explicit human attestation event can reject).
+
+Example dual-verdict state:
+
+```text
+Machine Verdict:  NEEDS_REVIEW
+Human Review:     ACCEPTED
+```
+
+---
+
 ## Build the difference
 
 GoATee itself follows the same principle it asks of coding agents:
@@ -522,7 +577,7 @@ It cannot silently redefine the agreement.
 
 ## What GoATee is not
 
-GoATee v0.1 is intentionally narrow.
+GoATee v0.2 is intentionally narrow.
 
 It is not:
 
@@ -546,7 +601,7 @@ The goal is much smaller:
 
 ## Thesis
 
-GoATee v0.1 is an experiment.
+GoATee v0.2 is an experiment.
 
 It needs to prove that someone who does not write production code can still answer:
 
