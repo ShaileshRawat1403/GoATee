@@ -328,8 +328,9 @@ class TestStatus(unittest.TestCase):
         self.assertIn("Verified-Commit: " + ver_sha, output)
         self.assertIn("Verified-At: 2026-09-20 12:00:00Z", output)
         self.assertIn("Machine Verdict: PASS", output)
-        self.assertIn("- AC-01: [automated] VERIFIED", output)
-        self.assertIn("- AC-02: [manual] VERIFIED", output)
+        self.assertIn("Human Review: PENDING", output)
+        self.assertIn("- AC-01: [automated]\n  Machine Status:    VERIFIED", output)
+        self.assertIn("- AC-02: [manual]\n  Machine Status:    VERIFIED\n  Human Attestation: PENDING", output)
 
         # Provenance test: modify contract description after verification
         c_md_modified = c_md.replace(
@@ -344,7 +345,7 @@ class TestStatus(unittest.TestCase):
 
         self.assertTrue(report_modified.is_verified)
         self.assertEqual(report_modified.machine_verdict, "PASS")
-        self.assertIn("- AC-01: [automated] VERIFIED", output_modified)
+        self.assertIn("- AC-01: [automated]\n  Machine Status:    VERIFIED", output_modified)
         # Contract's modified description must NOT leak into the historical receipt snapshot
         self.assertNotIn("Changed description after verification", output_modified)
 
@@ -491,6 +492,143 @@ Verified-Commit: 2222222333333344444444555555556666666677
         with self.assertRaises(ControlStateError) as ctx:
             get_change_report(self.repo, "001-test", "CLEAN", "headsha")
         self.assertIn("receipt criteria set does not match contract criteria", str(ctx.exception))
+
+    def test_dual_verdict_status_states(self):
+        """AC-08: Dual-verdict status reporting correctly handles no-review, valid committed review, uncommitted review, and stale review."""
+        from goatee.core.attest import record_attestation
+
+        # Setup initial commit and change
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: setup repo for dual-verdict"], cwd=self.repo, check=True)
+        base_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        change_id = "008-dual"
+        c_dir = self.repo / ".goatee" / "changes" / change_id
+        c_dir.mkdir(parents=True, exist_ok=True)
+        c_md = SAMPLE_CHANGE_MD_TEMPLATE.format(
+            change_id=change_id,
+            agreement_status="APPROVED",
+            budget_status="APPROVED",
+            baseline_commit=base_sha
+        )
+        (c_dir / "change.md").write_text(c_md, encoding="utf-8")
+
+        # Candidate commit
+        src_file = self.repo / "src" / f"{change_id}.py"
+        src_file.parent.mkdir(parents=True, exist_ok=True)
+        src_file.write_text("# candidate\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", f"feat: candidate {change_id}"], cwd=self.repo, check=True)
+        cand_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # Receipt with NEEDS_REVIEW
+        c_rc = SAMPLE_RECEIPT_MD_TEMPLATE.format(
+            change_id=change_id,
+            verdict="NEEDS_REVIEW",
+            baseline_commit=base_sha,
+            verified_commit=cand_sha,
+            ac01_status="VERIFIED",
+            ac02_status="NEEDS_REVIEW"
+        )
+        receipt_path = c_dir / "receipt.md"
+        receipt_path.write_text(c_rc, encoding="utf-8")
+        subprocess.run(["git", "add", str(receipt_path)], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", f"chore: receipt {change_id}"], cwd=self.repo, check=True)
+        rec_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # 1. State A: No review.md -> Human Review: PENDING
+        report_a = get_change_report(self.repo, change_id, "CLEAN", rec_sha)
+        self.assertEqual(report_a.machine_verdict, "NEEDS_REVIEW")
+        self.assertEqual(report_a.human_review, "PENDING")
+        self.assertIsNone(report_a.acceptance_blocked_reason)
+        out_a = format_change_detail(report_a)
+        self.assertIn("Machine Verdict: NEEDS_REVIEW", out_a)
+        self.assertIn("Human Review: PENDING", out_a)
+        self.assertIn("- AC-01: [automated]\n  Machine Status:    VERIFIED", out_a)
+        self.assertIn("- AC-02: [manual]\n  Machine Status:    NEEDS_REVIEW\n  Human Attestation: PENDING", out_a)
+
+        proj_a = get_project_status(self.repo)
+        out_proj_a = format_project_overview(proj_a)
+        self.assertIn("Machine: NEEDS_REVIEW", out_proj_a)
+        self.assertIn("Human: PENDING", out_proj_a)
+
+        # 2. State B: Valid committed review.md -> Human Review: ACCEPTED
+        record_attestation(
+            repo_root=self.repo,
+            change_id=change_id,
+            criterion_id="AC-02",
+            verified=True,
+            rejected=False,
+            note="Manual verification passed.",
+        )
+        subprocess.run(["git", "add", str(c_dir / "review.md")], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: commit review"], cwd=self.repo, check=True)
+        rev_head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        report_b = get_change_report(self.repo, change_id, "CLEAN", rev_head)
+        self.assertEqual(report_b.machine_verdict, "NEEDS_REVIEW")
+        self.assertEqual(report_b.human_review, "ACCEPTED")
+        self.assertIsNotNone(report_b.review_updated_at)
+        self.assertIn("GoATee Test", report_b.latest_reviewer)
+        out_b = format_change_detail(report_b)
+        self.assertIn("Human Review: ACCEPTED", out_b)
+        self.assertIn("Latest Reviewer: GoATee Test <test@goatee.dev> (Git-configured attribution)", out_b)
+        self.assertIn("- AC-02: [manual]\n  Machine Status:    NEEDS_REVIEW\n  Human Attestation: VERIFIED (attested by GoATee Test <test@goatee.dev> (Git-configured attribution))\n  Note: Manual verification passed.", out_b)
+
+        # 3. State C: Uncommitted / modified review.md -> Fails closed
+        (c_dir / "review.md").write_text((c_dir / "review.md").read_text() + " ", encoding="utf-8")
+        with self.assertRaises(ControlStateError) as ctx_c:
+            get_change_report(self.repo, change_id, "DIRTY", rev_head)
+        self.assertIn("uncommitted changes", str(ctx_c.exception))
+
+        # Revert modification
+        subprocess.run(["git", "checkout", "--", str(c_dir / "review.md")], cwd=self.repo, check=True)
+
+        # 4. State D: Stale review -> Fails closed
+        receipt_path.write_text(c_rc.replace("2026-09-20 12:00:00Z", "2026-09-20 14:00:00Z"), encoding="utf-8")
+        subprocess.run(["git", "add", str(receipt_path)], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: update receipt"], cwd=self.repo, check=True)
+        with self.assertRaises(ControlStateError) as ctx_d:
+            get_change_report(self.repo, change_id, "CLEAN", rev_head)
+        self.assertIn("stale", str(ctx_d.exception).lower())
+
+        # 5. State E: Flawed machine proof with no human rejection -> Human Review: PENDING with blocked reason
+        change_id_flawed = "008-flawed"
+        c_dir_flawed = self.repo / ".goatee" / "changes" / change_id_flawed
+        c_dir_flawed.mkdir(parents=True, exist_ok=True)
+        (c_dir_flawed / "change.md").write_text(SAMPLE_CHANGE_MD_TEMPLATE.format(
+            change_id=change_id_flawed,
+            agreement_status="APPROVED",
+            budget_status="APPROVED",
+            baseline_commit=base_sha
+        ), encoding="utf-8")
+
+        flawed_rc = SAMPLE_RECEIPT_MD_TEMPLATE.format(
+            change_id=change_id_flawed,
+            verdict="NEEDS_REVIEW",
+            baseline_commit=base_sha,
+            verified_commit=cand_sha,
+            ac02_status="NEEDS_REVIEW"
+        ).replace("**VERIFIED**", "**FAILED**", 1)
+        (c_dir_flawed / "receipt.md").write_text(flawed_rc, encoding="utf-8")
+        subprocess.run(["git", "add", str(c_dir_flawed)], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", f"chore: flawed receipt {change_id_flawed}"], cwd=self.repo, check=True)
+
+        report_e = get_change_report(self.repo, change_id_flawed, "CLEAN", cand_sha)
+        self.assertEqual(report_e.machine_verdict, "NEEDS_REVIEW")
+        self.assertEqual(report_e.human_review, "PENDING")
+        self.assertEqual(report_e.acceptance_blocked_reason, "Acceptance blocked by machine evidence.")
+        out_e = format_change_detail(report_e)
+        self.assertIn("Human Review: PENDING", out_e)
+        self.assertIn("(Acceptance blocked by machine evidence.)", out_e)
 
 
 if __name__ == "__main__":

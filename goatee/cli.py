@@ -428,6 +428,44 @@ def cmd_status(args: argparse.Namespace) -> int:
             return 1
 
 
+def cmd_attest(args: argparse.Namespace) -> int:
+    """Record human attestation into review.md."""
+    try:
+        validate_change_id(args.change_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if args.verified and not args.criterion:
+        print("Error: --verified requires --criterion.", file=sys.stderr)
+        return 1
+
+    from goatee.core.status import (
+        ControlStateError,
+        ReceiptSyntaxError,
+    )
+    from goatee.core.parser import ContractSyntaxError
+
+    cwd = Path.cwd()
+    try:
+        from goatee.core.attest import record_attestation
+        record_attestation(
+            repo_root=cwd,
+            change_id=args.change_id,
+            criterion_id=args.criterion,
+            verified=args.verified,
+            rejected=args.rejected,
+            note=args.note,
+        )
+        action_str = "VERIFIED" if args.verified else "REJECTED"
+        target_str = f"criterion '{args.criterion}'" if args.criterion else f"change '{args.change_id}'"
+        print(f"Recorded {action_str} attestation for {target_str} in .goatee/changes/{args.change_id}/review.md")
+        return 0
+    except (ControlStateError, ReceiptSyntaxError, ContractSyntaxError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="goatee",
@@ -463,6 +501,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_status = subparsers.add_parser("status", help="Show GoATee project or change status")
     p_status.add_argument("change_id", nargs="?", help="Optional change ID to inspect in detail")
     p_status.set_defaults(func=cmd_status)
+
+    # attest
+    p_attest = subparsers.add_parser("attest", help="Record human attestation into review.md")
+    p_attest.add_argument("change_id", help="Identifier of the change to attest")
+    p_attest.add_argument("--criterion", help="Criterion ID to attest (e.g. AC-11)")
+    p_attest.add_argument("--note", required=True, help="Mandatory review rationale note")
+    action_grp = p_attest.add_mutually_exclusive_group(required=True)
+    action_grp.add_argument("--verified", action="store_true", help="Positively attest manual criterion")
+    action_grp.add_argument("--rejected", action="store_true", help="Reject criterion or change")
+    p_attest.set_defaults(func=cmd_attest)
 
     return parser
 

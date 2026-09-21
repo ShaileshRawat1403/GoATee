@@ -732,6 +732,158 @@ class TestCLI(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    def test_attest_cli_validation_and_errors(self):
+        """AC-09: CLI argument validation, note normalization/escaping, and fail-closed error handling without tracebacks."""
+        parser = build_parser()
+        orig_cwd = os.getcwd()
+
+        # 1. Flag validation: missing mutual exclusion action
+        with self.assertRaises(SystemExit) as cm:
+            with patch("sys.stderr", io.StringIO()):
+                parser.parse_args(["attest", "001-feat", "--criterion", "AC-01", "--note", "test"])
+        self.assertNotEqual(cm.exception.code, 0)
+
+        # 2. Flag validation: both --verified and --rejected
+        with self.assertRaises(SystemExit) as cm:
+            with patch("sys.stderr", io.StringIO()):
+                parser.parse_args(["attest", "001-feat", "--criterion", "AC-01", "--verified", "--rejected", "--note", "test"])
+        self.assertNotEqual(cm.exception.code, 0)
+
+        # 3. Flag validation: missing --note
+        with self.assertRaises(SystemExit) as cm:
+            with patch("sys.stderr", io.StringIO()):
+                parser.parse_args(["attest", "001-feat", "--criterion", "AC-01", "--verified"])
+        self.assertNotEqual(cm.exception.code, 0)
+
+        # 4. --verified without --criterion -> exits 1 with clean error
+        stderr_io = io.StringIO()
+        with patch("sys.stderr", stderr_io):
+            rc = parser.parse_args(["attest", "001-feat", "--verified", "--note", "ok"]).func(
+                parser.parse_args(["attest", "001-feat", "--verified", "--note", "ok"])
+            )
+        self.assertEqual(rc, 1)
+        self.assertIn("Error: --verified requires --criterion.", stderr_io.getvalue())
+        self.assertNotIn("Traceback", stderr_io.getvalue())
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                (p / "README.md").write_text("# Test\n", encoding="utf-8")
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-feat"]).func(parser.parse_args(["new", "001-feat"]))
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "commit goatee init"], check=True, capture_output=True)
+
+                # 5. Non-existent change error
+                stderr_nonexist = io.StringIO()
+                with patch("sys.stderr", stderr_nonexist):
+                    rc = parser.parse_args(["attest", "999-missing", "--rejected", "--note", "missing"]).func(
+                        parser.parse_args(["attest", "999-missing", "--rejected", "--note", "missing"])
+                    )
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: Change '999-missing' not found.", stderr_nonexist.getvalue())
+                self.assertNotIn("Traceback", stderr_nonexist.getvalue())
+
+                # 6. Unverified change error
+                stderr_unver = io.StringIO()
+                with patch("sys.stderr", stderr_unver):
+                    rc = parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "unverified"]).func(
+                        parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "unverified"])
+                    )
+                self.assertEqual(rc, 1)
+                self.assertIn("has no delivery receipt", stderr_unver.getvalue())
+                self.assertNotIn("Traceback", stderr_unver.getvalue())
+
+                # Setup verified change
+                c_file = p / ".goatee" / "changes" / "001-feat" / "change.md"
+                c_content = c_file.read_text(encoding="utf-8")
+                c_content = c_content.replace("command: <test command>", "command: python3 -c 'exit(0)'")
+                c_file.write_text(c_content, encoding="utf-8")
+                update_contract_state(c_file, "Agreement-Status", "APPROVED")
+                update_contract_state(c_file, "Budget-Status", "APPROVED")
+                parser.parse_args(["approve", "001-feat"]).func(parser.parse_args(["approve", "001-feat"]))
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "deliver"], check=True, capture_output=True)
+                parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
+                subprocess.run(["git", "add", ".goatee/changes/001-feat/receipt.md"], check=True)
+                subprocess.run(["git", "commit", "-m", "receipt"], check=True, capture_output=True)
+
+                # 7. Empty note error
+                stderr_empty = io.StringIO()
+                with patch("sys.stderr", stderr_empty):
+                    rc = parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "   "]).func(
+                        parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "   "])
+                    )
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: --note must not be empty.", stderr_empty.getvalue())
+
+                # 8. Multi-line note error
+                stderr_multiline = io.StringIO()
+                with patch("sys.stderr", stderr_multiline):
+                    rc = parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "line1\nline2"]).func(
+                        parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "line1\nline2"])
+                    )
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: --note must be a single line without line breaks.", stderr_multiline.getvalue())
+
+                # 9. Dirty worktree error
+                (p / "dirty.txt").write_text("dirty\n", encoding="utf-8")
+                stderr_dirty = io.StringIO()
+                with patch("sys.stderr", stderr_dirty):
+                    rc = parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "valid"]).func(
+                        parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "valid"])
+                    )
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: Working tree must be clean before recording human attestation.", stderr_dirty.getvalue())
+                (p / "dirty.txt").unlink()
+
+                # 9b. Reviewer identity with embedded newline fails closed before review.md creation
+                subprocess.run(["git", "config", "user.name", "Tester\nInjected: line"], check=True)
+                stderr_inj_name = io.StringIO()
+                with patch("sys.stderr", stderr_inj_name):
+                    rc = parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "valid"]).func(
+                        parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "valid"])
+                    )
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: Git user.name and user.email must contain single-line values before attesting.", stderr_inj_name.getvalue())
+                self.assertFalse((p / ".goatee" / "changes" / "001-feat" / "review.md").exists())
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+
+                subprocess.run(["git", "config", "user.email", "test@test.local\nInjected: line"], check=True)
+                stderr_inj_email = io.StringIO()
+                with patch("sys.stderr", stderr_inj_email):
+                    rc = parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "valid"]).func(
+                        parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", "valid"])
+                    )
+                self.assertEqual(rc, 1)
+                self.assertIn("Error: Git user.name and user.email must contain single-line values before attesting.", stderr_inj_email.getvalue())
+                self.assertFalse((p / ".goatee" / "changes" / "001-feat" / "review.md").exists())
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+
+                # 10. Success with note containing pipe and backslash (escaping test)
+                stdout_ok = io.StringIO()
+                with patch("sys.stdout", stdout_ok):
+                    rc = parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", r"Verified with | pipe and \ backslash"]).func(
+                        parser.parse_args(["attest", "001-feat", "--criterion", "AC-02", "--verified", "--note", r"Verified with | pipe and \ backslash"])
+                    )
+                self.assertEqual(rc, 0)
+                self.assertIn("Recorded VERIFIED attestation for criterion 'AC-02'", stdout_ok.getvalue())
+
+                # Verify review.md contains properly escaped table row and raw event note
+                review_content = (p / ".goatee" / "changes" / "001-feat" / "review.md").read_text(encoding="utf-8")
+                self.assertIn(r"Verified with \| pipe and \\ backslash", review_content)
+                self.assertIn(r"Note: Verified with | pipe and \ backslash", review_content)
+
+            finally:
+                os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

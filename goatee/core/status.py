@@ -35,6 +35,17 @@ class ReceiptRow:
 
 
 @dataclass(frozen=True)
+class AttestationRow:
+    criterion_id: str
+    criterion_type: str
+    machine_status: str
+    human_attestation: str
+    reviewer: Optional[str] = None
+    attested_at: Optional[str] = None
+    note: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class ReceiptSnapshot:
     change_id: str
     verdict: str
@@ -45,6 +56,7 @@ class ReceiptSnapshot:
     expected_changes: List[str]
     surface_deviations: List[str]
     protected_changes: List[str]
+    mutations: List[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -56,6 +68,7 @@ class ChangeSummary:
     commit_label: str  # "Candidate" or "Verified"
     commit_sha: Optional[str]
     machine_verdict: str
+    human_review: str
     coverage_summary: str
 
 
@@ -79,12 +92,18 @@ class ChangeDetailReport:
     verified_commit: Optional[str] = None
     verified_at: Optional[str] = None
     machine_verdict: str = "NOT_VERIFIED"
+    human_review: str = "PENDING"
+    acceptance_blocked_reason: Optional[str] = None
+    review_updated_at: Optional[str] = None
+    latest_reviewer: Optional[str] = None
+    receipt_sha256: Optional[str] = None
     budget_snapshot_label: str = ""
     expected_changes: List[str] = field(default_factory=list)
     surface_deviations: List[str] = field(default_factory=list)
     protected_changes: List[str] = field(default_factory=list)
     expected_surface: List[str] = field(default_factory=list)
     criteria_statuses: List[ReceiptRow] = field(default_factory=list)
+    attestation_rows: List[AttestationRow] = field(default_factory=list)
 
 
 def find_project_root(cwd: Optional[Path] = None) -> Path:
@@ -245,6 +264,18 @@ def parse_receipt(receipt_path: Path) -> ReceiptSnapshot:
     surface_deviations = extract_sublist("Surface Deviations", budget_section)
     protected_changes = extract_sublist("Protected Changes", budget_section)
 
+    mutations: List[str] = []
+    if "## Git-Visible Mutation Report" in content:
+        mut_parts = re.split(r"\n##\s+", content.split("## Git-Visible Mutation Report")[1], maxsplit=1)
+        mut_section = mut_parts[0] if mut_parts else ""
+        if "### Git-Visible Mutations Detected" in mut_section:
+            for l in mut_section.splitlines():
+                l = l.strip()
+                if l.startswith("- "):
+                    val = l[2:].strip()
+                    if val and not val.startswith("Zero Git-visible"):
+                        mutations.append(val)
+
     return ReceiptSnapshot(
         change_id=change_id,
         verdict=verdict,
@@ -255,6 +286,7 @@ def parse_receipt(receipt_path: Path) -> ReceiptSnapshot:
         expected_changes=expected_changes,
         surface_deviations=surface_deviations,
         protected_changes=protected_changes,
+        mutations=mutations,
     )
 
 
@@ -295,6 +327,16 @@ def validate_contract_receipt_consistency(
             f"Inconsistent control state for '{change_id}': receipt criteria set does not match contract criteria."
         )
 
+    # Check type equality
+    receipt_row_map = {r.criterion_id: r for r in receipt.rows}
+    for ac in contract.acceptance_criteria:
+        rec_row = receipt_row_map.get(ac.id)
+        if rec_row and ac.evidence_type != rec_row.criterion_type:
+            raise ControlStateError(
+                f"Error: Criterion '{ac.id}' type differs between change contract and delivery receipt. "
+                "Review cannot continue against inconsistent evidence."
+            )
+
     # D. Verified commit non-empty
     if not receipt.verified_commit:
         raise ControlStateError(
@@ -332,6 +374,36 @@ def get_change_report(
         receipt = parse_receipt(receipt_path)
         validate_contract_receipt_consistency(change_dir, contract, receipt)
 
+        from goatee.core.attest import load_and_validate_review
+        review = load_and_validate_review(change_dir, contract, receipt, repo_root)
+
+        if review:
+            human_review = review.verdict
+            review_updated_at = review.updated_at
+            latest_reviewer = (
+                f"{review.events[-1].reviewer_name} <{review.events[-1].reviewer_email}> ({review.events[-1].attribution} attribution)"
+                if review.events else None
+            )
+            receipt_sha256 = review.receipt_sha256
+            attestation_rows = review.rows
+        else:
+            human_review = "PENDING"
+            review_updated_at = None
+            latest_reviewer = None
+            receipt_sha256 = None
+            attestation_rows = []
+
+        acceptance_blocked_reason = None
+        if human_review == "PENDING":
+            flawed_machine = (
+                any(r.status in ("FAILED", "NOT_RUN") for r in receipt.rows if r.criterion_type == "automated")
+                or len(receipt.surface_deviations) > 0
+                or len(receipt.protected_changes) > 0
+                or len(receipt.mutations) > 0
+            )
+            if flawed_machine:
+                acceptance_blocked_reason = "Acceptance blocked by machine evidence."
+
         return ChangeDetailReport(
             change_id=change_id,
             intent=intent,
@@ -343,11 +415,17 @@ def get_change_report(
             verified_commit=receipt.verified_commit,
             verified_at=receipt.verified_at,
             machine_verdict=receipt.verdict,
+            human_review=human_review,
+            acceptance_blocked_reason=acceptance_blocked_reason,
+            review_updated_at=review_updated_at,
+            latest_reviewer=latest_reviewer,
+            receipt_sha256=receipt_sha256,
             expected_changes=receipt.expected_changes,
             surface_deviations=receipt.surface_deviations,
             protected_changes=receipt.protected_changes,
             expected_surface=contract.build_budget.expected_surface,
             criteria_statuses=receipt.rows,
+            attestation_rows=attestation_rows,
         )
     else:
         # Unverified change: pre-verification candidate budget inspection
@@ -389,6 +467,7 @@ def get_change_report(
             is_verified=False,
             candidate_commit=current_head,
             machine_verdict="NOT_VERIFIED",
+            human_review="PENDING",
             budget_snapshot_label=budget_label,
             expected_changes=exp_changes,
             surface_deviations=devs,
@@ -441,6 +520,7 @@ def get_project_status(repo_root: Optional[Path] = None) -> ProjectStatusReport:
             commit_label=commit_label,
             commit_sha=commit_sha,
             machine_verdict=detail.machine_verdict,
+            human_review=detail.human_review,
             coverage_summary=coverage,
         ))
 
@@ -470,6 +550,7 @@ def format_project_overview(report: ProjectStatusReport) -> str:
         lines.append(f"  Baseline: {c.baseline_commit}")
         lines.append(f"  {c.commit_label}: {c.commit_sha}")
         lines.append(f"  Machine: {c.machine_verdict}")
+        lines.append(f"  Human: {c.human_review}")
         lines.append(f"  Coverage: {c.coverage_summary}")
         lines.append("")
 
@@ -498,10 +579,39 @@ def format_change_detail(report: ChangeDetailReport, contract: Optional[ChangeCo
         lines.append(f"Verified-Commit: {report.verified_commit}")
         lines.append(f"Verified-At: {report.verified_at}")
         lines.append(f"Machine Verdict: {report.machine_verdict}")
+        lines.append(f"Human Review: {report.human_review}")
+        if report.acceptance_blocked_reason:
+            lines.append(f"  ({report.acceptance_blocked_reason})")
+        if report.review_updated_at:
+            lines.append(f"Review Updated-At: {report.review_updated_at}")
+            lines.append(f"Latest Reviewer: {report.latest_reviewer}")
+            lines.append(f"Receipt-SHA256: {report.receipt_sha256}")
         lines.append("")
         lines.append("Requirement Coverage:")
+        att_map = {r.criterion_id: r for r in report.attestation_rows}
         for r in report.criteria_statuses:
-            lines.append(f"- {r.criterion_id}: [{r.criterion_type}] {r.status}")
+            lines.append(f"- {r.criterion_id}: [{r.criterion_type}]")
+            lines.append(f"  Machine Status:    {r.status}")
+            if r.criterion_type == "manual":
+                att = att_map.get(r.criterion_id)
+                if att and att.human_attestation != "PENDING":
+                    rev_txt = (
+                        f" (attested by {att.reviewer})"
+                        if att.reviewer and att.human_attestation == "VERIFIED"
+                        else (f" (rejected by {att.reviewer})" if att.reviewer and att.human_attestation == "REJECTED" else "")
+                    )
+                    lines.append(f"  Human Attestation: {att.human_attestation}{rev_txt}")
+                    if att.note:
+                        lines.append(f"  Note: {att.note}")
+                else:
+                    lines.append("  Human Attestation: PENDING")
+            elif r.criterion_type == "automated":
+                att = att_map.get(r.criterion_id)
+                if att and att.human_attestation == "REJECTED":
+                    rev_txt = f" (disagreed by {att.reviewer})" if att.reviewer else ""
+                    lines.append(f"  Human Attestation: REJECTED{rev_txt}")
+                    if att.note:
+                        lines.append(f"  Note: {att.note}")
         lines.append("")
         lines.append("Build Budget & Surface Analysis:")
         lines.append(f"Expected Changes: {len(report.expected_changes)}")
@@ -514,6 +624,7 @@ def format_change_detail(report: ChangeDetailReport, contract: Optional[ChangeCo
         lines.append("Evidence State:")
         lines.append(f"Candidate-Commit: {report.candidate_commit}")
         lines.append(f"Machine Verdict: {report.machine_verdict}")
+        lines.append(f"Human Review: {report.human_review}")
         lines.append("")
         if report.budget_snapshot_label == "UNAVAILABLE — baseline not locked":
             lines.append("Build Budget Snapshot:")
