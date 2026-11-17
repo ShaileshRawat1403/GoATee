@@ -617,6 +617,39 @@ Attestation requires an existing machine receipt (`receipt.md`). It creates or a
 
 ---
 
+## Export delivery certificates
+
+Generate presentation-ready, tamper-evident HTML compliance certificates for clients, stakeholders, and auditing teams:
+
+```bash
+# Export certificate for active or specified change
+goatee export 001-export-csv
+
+# Or use the cert shortcut
+goatee cert 001-export-csv -o reports/delivery-cert.html
+```
+
+The exported certificate is completely self-contained (HTML5 with embedded CSS, zero external CDN links or network calls, print/PDF optimized). It includes:
+- Dual-verdict status badges (`Machine Verdict` and `Human Review`).
+- Cryptographic commit provenance (`Baseline-Commit`, `Verified-Commit`, `Receipt-SHA256`, `Contract-SHA256`).
+- Full Requirement Coverage Matrix with execution times and signed human reviewer attribution.
+- Build Budget & Surface Analysis showing zero unapproved surface deviations and zero blast-radius breaches.
+
+---
+
+## Standalone executable packaging
+
+To use GoATee in non-Python environments (e.g. Go, Rust, TypeScript repositories) without running `pip install`:
+
+```bash
+# Build standalone zero-dependency executable zipapp
+python3 scripts/build_zipapp.py
+```
+
+This generates `dist/goatee`, a single standalone executable file with an embedded shebang (`#!/usr/bin/env python3`). You can copy it to `/usr/local/bin/goatee` or check it into your repository root for instant use across any machine with Python 3.10+ installed.
+
+---
+
 ## Connect coding agents via MCP
 
 GoATee includes a zero-dependency Model Context Protocol (MCP) server running over stdio, allowing AI coding assistants (such as Claude Code, Cursor, Windsurf, or Gemini CLI) to inspect boundaries autonomously:

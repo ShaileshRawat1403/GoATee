@@ -977,6 +977,45 @@ class TestCLI(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    def test_export_cli(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                subprocess.run(["git", "config", "user.email", "tester@test.local"], check=True)
+                (p / "README.md").write_text("# Test\n", encoding="utf-8")
+                subprocess.run(["git", "add", "README.md"], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-cert"]).func(parser.parse_args(["new", "001-cert"]))
+                # Approve
+                parser.parse_args(["approve", "001-cert"]).func(parser.parse_args(["approve", "001-cert"]))
+
+                stdout_buf = io.StringIO()
+                with patch("sys.stdout", stdout_buf):
+                    rc = parser.parse_args(["export", "001-cert"]).func(
+                        parser.parse_args(["export", "001-cert"])
+                    )
+                self.assertEqual(rc, 0)
+                self.assertIn("Exported HTML delivery certificate", stdout_buf.getvalue())
+                self.assertTrue((p / ".goatee" / "certificates" / "001-cert-certificate.html").is_file())
+
+                # Test cert alias
+                stdout_cert = io.StringIO()
+                with patch("sys.stdout", stdout_cert):
+                    rc2 = parser.parse_args(["cert", "001-cert", "-o", "custom.html"]).func(
+                        parser.parse_args(["cert", "001-cert", "-o", "custom.html"])
+                    )
+                self.assertEqual(rc2, 0)
+                self.assertTrue((p / "custom.html").is_file())
+            finally:
+                os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

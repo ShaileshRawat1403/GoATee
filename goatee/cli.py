@@ -885,6 +885,24 @@ def cmd_rules(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_export(args: argparse.Namespace) -> int:
+    """Export change delivery artifacts, certificates, and compliance reports."""
+    from goatee.core.status import find_project_root, ControlStateError
+    from goatee.core.exporter import export_certificate
+
+    try:
+        change_id = resolve_or_fail_change_id(args.change_id)
+        root = find_project_root()
+        out_p = Path(args.output) if getattr(args, "output", None) else None
+        target = export_certificate(root, change_id, output_path=out_p)
+        print(f"Exported HTML delivery certificate for '{change_id}':")
+        print(f"  Path: {target}")
+        return 0
+    except (ValueError, ControlStateError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 class GoateeArgumentParser(argparse.ArgumentParser):
     """Custom argument parser enforcing conditional sub-command validation."""
     def parse_args(self, args=None, namespace=None):
@@ -999,6 +1017,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_hook_in.set_defaults(func=cmd_hook)
     p_hook_un = hook_sub.add_parser("uninstall", help="Uninstall pre-commit guardrail hook")
     p_hook_un.set_defaults(func=cmd_hook)
+
+    # export
+    p_export = subparsers.add_parser("export", help="Export presentation-ready delivery certificates and artifacts")
+    p_export.add_argument("change_id", nargs="?", help="Identifier of the change to export (inferred if omitted)")
+    p_export.add_argument("--html", action="store_true", default=True, help="Export as self-contained HTML certificate (default)")
+    p_export.add_argument("-o", "--output", help="Custom output file path")
+    p_export.set_defaults(func=cmd_export)
+
+    # cert (alias for export)
+    p_cert = subparsers.add_parser("cert", help="Generate HTML delivery certificate (alias for export)")
+    p_cert.add_argument("change_id", nargs="?", help="Identifier of the change to export (inferred if omitted)")
+    p_cert.add_argument("-o", "--output", help="Custom output file path")
+    p_cert.set_defaults(func=cmd_export)
 
     return parser
 
