@@ -77,6 +77,7 @@ class ProjectStatusReport:
     project_name: str
     working_tree: str
     changes: List[ChangeSummary]
+    archived_changes: List[ChangeSummary] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -402,12 +403,17 @@ def get_change_report(
     working_tree: str,
     current_head: str
 ) -> ChangeDetailReport:
-    """Build a detailed ChangeDetailReport for a single change."""
+    """Build a detailed ChangeDetailReport for a single change (active or archived)."""
     change_dir = repo_root / ".goatee" / "changes" / change_id
     change_md_path = change_dir / "change.md"
 
     if not change_dir.is_dir() or not change_md_path.is_file():
-        raise ControlStateError(f"Change '{change_id}' not found.")
+        archive_dir = repo_root / ".goatee" / "archive" / change_id
+        if archive_dir.is_dir() and (archive_dir / "change.md").is_file():
+            change_dir = archive_dir
+            change_md_path = archive_dir / "change.md"
+        else:
+            raise ControlStateError(f"Change '{change_id}' not found.")
 
     try:
         contract = parse_change_contract(change_md_path)
@@ -529,61 +535,74 @@ def get_change_report(
         )
 
 
+def _build_change_summary(
+    root: Path,
+    cdir: Path,
+    working_tree: str,
+    current_head: str
+) -> ChangeSummary:
+    detail = get_change_report(root, cdir.name, working_tree, current_head)
+
+    if detail.is_verified:
+        commit_label = "Verified"
+        commit_sha = detail.verified_commit[:7] if detail.verified_commit else "(none)"
+        verified_count = sum(1 for r in detail.criteria_statuses if r.status == "VERIFIED")
+        total_count = len(detail.criteria_statuses)
+        coverage = f"{verified_count}/{total_count} VERIFIED"
+    else:
+        commit_label = "Candidate"
+        commit_sha = current_head[:7] if current_head else "(none)"
+        coverage = "PENDING"
+
+    base_sha = detail.baseline_commit[:7] if detail.baseline_commit else "(none)"
+
+    return ChangeSummary(
+        change_id=detail.change_id,
+        agreement_status=detail.agreement_status,
+        budget_status=detail.budget_status,
+        baseline_commit=base_sha,
+        commit_label=commit_label,
+        commit_sha=commit_sha,
+        machine_verdict=detail.machine_verdict,
+        human_review=detail.human_review,
+        coverage_summary=coverage,
+    )
+
+
 def get_project_status(repo_root: Optional[Path] = None) -> ProjectStatusReport:
-    """Build ProjectStatusReport covering all direct changes under .goatee/changes/."""
+    """Build ProjectStatusReport covering active changes under .goatee/changes/ and archived in .goatee/archive/."""
     root = find_project_root(repo_root)
     project_name = parse_project_name(root / ".goatee" / "project.md")
     working_tree = get_working_tree_state(root)
     current_head = resolve_current_head(root)
 
     changes_dir = root / ".goatee" / "changes"
-    if not changes_dir.is_dir():
-        return ProjectStatusReport(project_name=project_name, working_tree=working_tree, changes=[])
-
-    # Direct child directories, sorted deterministically
-    change_dirs = sorted([d for d in changes_dir.iterdir() if d.is_dir()], key=lambda d: d.name)
     summaries: List[ChangeSummary] = []
+    if changes_dir.is_dir():
+        change_dirs = sorted([d for d in changes_dir.iterdir() if d.is_dir()], key=lambda d: d.name)
+        for cdir in change_dirs:
+            change_md = cdir / "change.md"
+            if not change_md.is_file():
+                raise ControlStateError(f"Incomplete change directory '{cdir}' missing change.md.")
+            summaries.append(_build_change_summary(root, cdir, working_tree, current_head))
 
-    for cdir in change_dirs:
-        change_md = cdir / "change.md"
-        if not change_md.is_file():
-            raise ControlStateError(f"Incomplete change directory '{cdir}' missing change.md.")
-
-        detail = get_change_report(root, cdir.name, working_tree, current_head)
-
-        if detail.is_verified:
-            commit_label = "Verified"
-            commit_sha = detail.verified_commit[:7] if detail.verified_commit else "(none)"
-            verified_count = sum(1 for r in detail.criteria_statuses if r.status == "VERIFIED")
-            total_count = len(detail.criteria_statuses)
-            coverage = f"{verified_count}/{total_count} VERIFIED"
-        else:
-            commit_label = "Candidate"
-            commit_sha = current_head[:7] if current_head else "(none)"
-            coverage = "PENDING"
-
-        base_sha = detail.baseline_commit[:7] if detail.baseline_commit else "(none)"
-
-        summaries.append(ChangeSummary(
-            change_id=detail.change_id,
-            agreement_status=detail.agreement_status,
-            budget_status=detail.budget_status,
-            baseline_commit=base_sha,
-            commit_label=commit_label,
-            commit_sha=commit_sha,
-            machine_verdict=detail.machine_verdict,
-            human_review=detail.human_review,
-            coverage_summary=coverage,
-        ))
+    archived_summaries: List[ChangeSummary] = []
+    archive_dir = root / ".goatee" / "archive"
+    if archive_dir.is_dir():
+        arch_dirs = sorted([d for d in archive_dir.iterdir() if d.is_dir()], key=lambda d: d.name)
+        for adir in arch_dirs:
+            if (adir / "change.md").is_file():
+                archived_summaries.append(_build_change_summary(root, adir, working_tree, current_head))
 
     return ProjectStatusReport(
         project_name=project_name,
         working_tree=working_tree,
         changes=summaries,
+        archived_changes=archived_summaries,
     )
 
 
-def format_project_overview(report: ProjectStatusReport) -> str:
+def format_project_overview(report: ProjectStatusReport, show_archived: bool = False) -> str:
     """Format ProjectStatusReport as plain-text CLI output."""
     lines = [
         f"Project: {report.project_name}",
@@ -592,19 +611,34 @@ def format_project_overview(report: ProjectStatusReport) -> str:
         "Changes:"
     ]
     if not report.changes:
-        lines.append("  (no changes found)")
-        return "\n".join(lines)
+        lines.append("  (no active changes found)")
+    else:
+        for c in report.changes:
+            lines.append(f"- {c.change_id}")
+            lines.append(f"  Agreement: {c.agreement_status}")
+            lines.append(f"  Budget: {c.budget_status}")
+            lines.append(f"  Baseline: {c.baseline_commit}")
+            lines.append(f"  {c.commit_label}: {c.commit_sha}")
+            lines.append(f"  Machine: {c.machine_verdict}")
+            lines.append(f"  Human: {c.human_review}")
+            lines.append(f"  Coverage: {c.coverage_summary}")
+            lines.append("")
 
-    for c in report.changes:
-        lines.append(f"- {c.change_id}")
-        lines.append(f"  Agreement: {c.agreement_status}")
-        lines.append(f"  Budget: {c.budget_status}")
-        lines.append(f"  Baseline: {c.baseline_commit}")
-        lines.append(f"  {c.commit_label}: {c.commit_sha}")
-        lines.append(f"  Machine: {c.machine_verdict}")
-        lines.append(f"  Human: {c.human_review}")
-        lines.append(f"  Coverage: {c.coverage_summary}")
-        lines.append("")
+    if report.archived_changes:
+        if show_archived:
+            lines.append("Archived Changes:")
+            for c in report.archived_changes:
+                lines.append(f"- {c.change_id}")
+                lines.append(f"  Agreement: {c.agreement_status}")
+                lines.append(f"  Budget: {c.budget_status}")
+                lines.append(f"  Baseline: {c.baseline_commit}")
+                lines.append(f"  {c.commit_label}: {c.commit_sha}")
+                lines.append(f"  Machine: {c.machine_verdict}")
+                lines.append(f"  Human: {c.human_review}")
+                lines.append(f"  Coverage: {c.coverage_summary}")
+                lines.append("")
+        else:
+            lines.append(f"Archived Changes: {len(report.archived_changes)} (use --all to inspect)")
 
     return "\n".join(lines).rstrip()
 

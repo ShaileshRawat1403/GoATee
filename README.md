@@ -527,19 +527,70 @@ GoATee records the new surface in `change.md`, logs the attribution and rational
 
 ---
 
+## Lint change contracts
+
+Before approving a change contract, developers and CI can run `goatee lint` to statically catch structural mistakes, path traversal risks, and budget conflicts:
+
+```bash
+goatee lint 001-export-csv
+```
+
+GoATee validates:
+- **Fatal Conflicts**: Flags if any path is accidentally declared in both `Expected Surface` and protected `Blast Radius`.
+- **Path Traversal**: Disallows directory traversal (`../`) and forbidden characters.
+- **Criteria Quality**: Verifies automated test commands and manual verification instructions are fully populated.
+
+---
+
+## Export AI assistant rules
+
+To ensure coding assistants automatically adhere to GoATee boundaries without manual prompting, export native configuration files tailored for Claude Code, Cursor, Windsurf, or Gemini:
+
+```bash
+# Export to all supported tools (CLAUDE.md, .cursorrules, .windsurfrules, .gemini/rules)
+goatee rules export
+
+# Or export to a specific assistant
+goatee rules export --target claude
+goatee rules export --target cursor
+```
+
+GoATee embeds the active change's approved `Expected Surface` and `Blast Radius` between bounded markers (`<!-- GOATEE-RULES-START -->`), preserving your existing custom prompts and developer notes.
+
+---
+
 ## Inspect status
 
 `goatee status` provides read-only visibility into the control plane without modifying repository state or files:
 
 ```bash
-# Repo-wide overview of all changes
+# Repo-wide overview of active changes
 goatee status
+
+# Include historical archived changes
+goatee status --all
 
 # Detailed view for a specific change
 goatee status 001-export-csv
 ```
 
 Status reports the contract approval state, machine verification verdict, human review state, candidate commit, and whether the working tree is clean.
+
+---
+
+## Land and archive changes
+
+Once a change is verified and human attestation is `ACCEPTED`, land the change to archive its control records and keep active status clean:
+
+```bash
+# Land accepted change and archive to .goatee/archive/<change-id>
+goatee land 001-export-csv
+
+# Or explicitly archive an abandoned or superseded change
+goatee archive 002-old-experiment --reason SUPERSEDED
+```
+
+Landing verifies that all preconditions are met, updates `Lifecycle-Status: LANDED`, moves the change directory to `.goatee/archive/`, and removes `.goatee/.active`. Archived changes are excluded from default `goatee status` output unless `--all` is passed.
 
 ---
 

@@ -556,16 +556,23 @@ def load_and_validate_review(
     receipt_path = change_dir / "receipt.md"
     current_sha256 = hashlib.sha256(receipt_path.read_bytes()).hexdigest()
     res_log = subprocess.run(
-        ["git", "log", "-1", "--format=%H", "--", str(receipt_path.relative_to(repo_root))],
+        ["git", "log", "--follow", "--format=%H", "--", str(receipt_path.relative_to(repo_root))],
         capture_output=True,
         text=True,
         cwd=repo_root
     )
-    current_receipt_commit = res_log.stdout.strip()
+    receipt_commits = [c.strip() for c in res_log.stdout.splitlines() if c.strip()]
+    current_receipt_commit = receipt_commits[0] if receipt_commits else ""
+
+    is_archived = (change_dir.parent.name == "archive")
+    commit_matches = (
+        (review.receipt_commit == current_receipt_commit)
+        or (is_archived and review.receipt_commit in receipt_commits)
+    )
 
     if (
         review.receipt_sha256 != current_sha256
-        or review.receipt_commit != current_receipt_commit
+        or not commit_matches
         or review.verified_commit != receipt.verified_commit
     ):
         raise ControlStateError(

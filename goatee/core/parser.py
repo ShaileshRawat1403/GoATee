@@ -160,8 +160,14 @@ def parse_change_contract(path: Path) -> ChangeContract:
     budget_meta = parse_metadata_block(budget_block)
     budget.dependency_policy = budget_meta.get("Dependency-Policy", "")
 
+    intent = ""
+    intent_match = re.search(r"## Intent\s*\n(.*?)(?=\n##|\Z)", content, re.DOTALL)
+    if intent_match:
+        intent = intent_match.group(1).strip()
+
     return ChangeContract(
         change_id=change_id,
+        intent=intent,
         acceptance_criteria=criteria,
         build_budget=budget,
         contract_state=contract_state,

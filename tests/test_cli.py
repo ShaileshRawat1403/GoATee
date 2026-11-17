@@ -926,6 +926,57 @@ class TestCLI(unittest.TestCase):
             self.assertEqual(cm.exception.code, 0)
             self.assertIn("0.3.0", buf.getvalue())
 
+    def test_lint_cli(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-lint"]).func(parser.parse_args(["new", "001-lint"]))
+                # Lint template change.md
+                c_path = p / ".goatee" / "changes" / "001-lint" / "change.md"
+                content = c_path.read_text(encoding="utf-8")
+                content = content.replace("<test command>", "pytest")
+                content = content.replace("<description>", "tests pass")
+                content = content.replace("<what to observe>", "visual")
+                content = content.replace("<file/directory path 1>", "app.py")
+                content = content.replace("<file/directory path 2>", "helper.py")
+                content = content.replace("<module/subsystem that must remain untouched>", "config/db.py")
+                content = content.replace("<existing component or utility to leverage>", "none")
+                content = content.replace("<what is included>", "feature")
+                content = content.replace("<what is excluded>", "none")
+                content = content.replace("<High-level problem statement and business objective>", "Intent text")
+                c_path.write_text(content, encoding="utf-8")
+
+                stdout_buf = io.StringIO()
+                with patch("sys.stdout", stdout_buf):
+                    rc = parser.parse_args(["lint", "001-lint"]).func(parser.parse_args(["lint", "001-lint"]))
+                self.assertEqual(rc, 0)
+                self.assertIn("Status: PASSED", stdout_buf.getvalue())
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_rules_export_cli(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                stdout_buf = io.StringIO()
+                with patch("sys.stdout", stdout_buf):
+                    rc = parser.parse_args(["rules", "export", "--target", "claude"]).func(
+                        parser.parse_args(["rules", "export", "--target", "claude"])
+                    )
+                self.assertEqual(rc, 0)
+                self.assertTrue((p / "CLAUDE.md").is_file())
+                self.assertIn("CLAUDE.md", stdout_buf.getvalue())
+            finally:
+                os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

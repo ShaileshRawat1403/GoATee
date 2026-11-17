@@ -79,6 +79,11 @@ def cmd_new(args: argparse.Namespace) -> int:
     content = content.replace("{change_id}", args.change_id)
 
     change_file.write_text(content, encoding="utf-8")
+    active_file = cwd / ".goatee" / ".active"
+    try:
+        active_file.write_text(args.change_id + "\n", encoding="utf-8")
+    except OSError:
+        pass
     print(f"Created change contract at {change_file}")
     return 0
 
@@ -441,6 +446,8 @@ def cmd_status(args: argparse.Namespace) -> int:
             current_head = resolve_current_head(root)
             change_report = get_change_report(root, args.change_id, working_tree, current_head)
             contract_path = root / ".goatee" / "changes" / args.change_id / "change.md"
+            if not contract_path.is_file():
+                contract_path = root / ".goatee" / "archive" / args.change_id / "change.md"
             contract = parse_change_contract(contract_path) if contract_path.is_file() else None
             output = format_change_detail(change_report, contract)
             print(output)
@@ -450,8 +457,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             return 1
     else:
         try:
+            show_archived = getattr(args, "all", False) or getattr(args, "archived", False)
             project_report = get_project_status(root)
-            output = format_project_overview(project_report)
+            output = format_project_overview(project_report, show_archived=show_archived)
             print(output)
             return 0
         except (ControlStateError, ReceiptSyntaxError, ContractSyntaxError) as e:
@@ -664,9 +672,25 @@ def cmd_amend(args: argparse.Namespace) -> int:
     now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
 
     new_surface_path = args.add_surface.strip()
+    lines = content.splitlines()
+
+    # Remove from ### Blast Radius if present
+    in_blast_radius = False
+    cleaned_lines = []
+    for line in lines:
+        if line.strip() == "### Blast Radius":
+            in_blast_radius = True
+            cleaned_lines.append(line)
+            continue
+        if in_blast_radius:
+            if line.startswith("### ") or line.startswith("## ") or (":" in line and not line.startswith(" ")):
+                in_blast_radius = False
+            elif line.strip() == f"- {new_surface_path}":
+                continue
+        cleaned_lines.append(line)
+    lines = cleaned_lines
 
     # Insert under ### Expected Surface
-    lines = content.splitlines()
     new_lines = []
     inserted_surface = False
     in_exp_surface = False
@@ -781,6 +805,86 @@ python3 -m goatee.cli check
         return 1
 
 
+def cmd_lint(args: argparse.Namespace) -> int:
+    """Semantic and structural contract linter."""
+    from goatee.core.status import find_project_root, ControlStateError
+    from goatee.core.linter import lint_change_contract, format_lint_report
+
+    try:
+        change_id = resolve_or_fail_change_id(args.change_id)
+        root = find_project_root()
+    except (ValueError, ControlStateError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    contract_path = root / ".goatee" / "changes" / change_id / "change.md"
+    if not contract_path.is_file():
+        contract_path = root / ".goatee" / "archive" / change_id / "change.md"
+
+    issues = lint_change_contract(contract_path)
+    report = format_lint_report(change_id, issues)
+    print(report)
+
+    has_errors = any(i.severity == "ERROR" for i in issues)
+    return 1 if has_errors else 0
+
+
+def cmd_land(args: argparse.Namespace) -> int:
+    """Land an accepted change into project history and archive its control records."""
+    from goatee.core.status import find_project_root, ControlStateError
+    from goatee.core.lifecycle import land_change, LifecycleError
+
+    try:
+        change_id = resolve_or_fail_change_id(args.change_id)
+        root = find_project_root()
+        dest = land_change(root, change_id)
+        print(f"Successfully landed change '{change_id}'.")
+        print(f"Archived control records to {dest}")
+        print("Notice: Commit .goatee/ in Git to record this landing in repository history.")
+        return 0
+    except (ValueError, ControlStateError, LifecycleError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_archive(args: argparse.Namespace) -> int:
+    """Explicitly archive a change contract."""
+    from goatee.core.status import find_project_root, ControlStateError
+    from goatee.core.lifecycle import archive_change, LifecycleError
+
+    try:
+        change_id = resolve_or_fail_change_id(args.change_id)
+        root = find_project_root()
+        reason = getattr(args, "reason", None) or "ARCHIVED"
+        dest = archive_change(root, change_id, reason=reason)
+        print(f"Archived change '{change_id}' to {dest} (reason: {reason}).")
+        print("Notice: Commit .goatee/ in Git to record this change in repository history.")
+        return 0
+    except (ValueError, ControlStateError, LifecycleError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
+def cmd_rules(args: argparse.Namespace) -> int:
+    """Export native AI agent governance rules."""
+    from goatee.core.status import find_project_root, ControlStateError
+    from goatee.core.rules import export_agent_rules
+
+    try:
+        root = find_project_root()
+        target = getattr(args, "target", "all") or "all"
+        out_p = Path(args.output) if getattr(args, "output", None) else None
+        results = export_agent_rules(root, target=target, custom_output=out_p)
+        print(f"Exported GoATee AI delivery rules for target '{target}':")
+        for p, ok in results:
+            rel = p.relative_to(root) if p.is_relative_to(root) else p
+            print(f"  ✓ {rel}")
+        return 0
+    except (ControlStateError, ValueError) as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+
 class GoateeArgumentParser(argparse.ArgumentParser):
     """Custom argument parser enforcing conditional sub-command validation."""
     def parse_args(self, args=None, namespace=None):
@@ -838,7 +942,33 @@ def build_parser() -> argparse.ArgumentParser:
     # status
     p_status = subparsers.add_parser("status", help="Show GoATee project or change status")
     p_status.add_argument("change_id", nargs="?", help="Optional change ID to inspect in detail")
+    p_status.add_argument("--all", action="store_true", help="Include archived changes in project overview")
+    p_status.add_argument("--archived", action="store_true", help="Include archived changes in project overview")
     p_status.set_defaults(func=cmd_status)
+
+    # lint
+    p_lint = subparsers.add_parser("lint", help="Statically validate change contract syntax, budget conflicts, and security boundaries")
+    p_lint.add_argument("change_id", nargs="?", help="Identifier of the change to lint (inferred if omitted)")
+    p_lint.set_defaults(func=cmd_lint)
+
+    # land
+    p_land = subparsers.add_parser("land", help="Land an accepted change into project history and archive its control records")
+    p_land.add_argument("change_id", nargs="?", help="Identifier of the change to land (inferred if omitted)")
+    p_land.set_defaults(func=cmd_land)
+
+    # archive
+    p_archive = subparsers.add_parser("archive", help="Explicitly archive a change contract")
+    p_archive.add_argument("change_id", nargs="?", help="Identifier of the change to archive (inferred if omitted)")
+    p_archive.add_argument("--reason", default="ARCHIVED", help="Reason for archival (e.g. SUPERSEDED, ABANDONED)")
+    p_archive.set_defaults(func=cmd_archive)
+
+    # rules
+    p_rules = subparsers.add_parser("rules", help="Manage native AI coding assistant governance rules")
+    rules_sub = p_rules.add_subparsers(dest="rules_action", required=True)
+    p_rules_exp = rules_sub.add_parser("export", help="Export or update AI agent rules (CLAUDE.md, .cursorrules, .windsurfrules, .gemini/rules)")
+    p_rules_exp.add_argument("--target", default="all", choices=["claude", "cursor", "windsurf", "gemini", "all"], help="Target assistant rule file format (default: all)")
+    p_rules_exp.add_argument("--output", help="Custom output file path")
+    p_rules_exp.set_defaults(func=cmd_rules)
 
     # attest
     p_attest = subparsers.add_parser("attest", help="Record human attestation into review.md")

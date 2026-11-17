@@ -48,7 +48,8 @@ def matches_path_entry(file_path: str, entry: str) -> bool:
     Supports:
     - Exact file matches: 'goatee/cli.py' matches 'goatee/cli.py'
     - Directory prefixes: 'tests/' or 'tests' matches 'tests/test_x.py' and 'tests/sub/test_y.py'
-    No glob patterns.
+    - Directory wildcards: 'tests/**' or 'src/*' matches files under those directories
+    - Glob wildcards: '*.py' or 'tests/test_*.py' matches via fnmatch
     """
     file_norm = normalize_relpath(file_path)
     entry_norm = normalize_relpath(entry)
@@ -65,10 +66,23 @@ def matches_path_entry(file_path: str, entry: str) -> bool:
     if file_norm == entry_norm:
         return True
 
+    # Strip trailing glob wildcards like /** or /* for clean directory prefix matching
+    clean_entry = entry_norm
+    if clean_entry.endswith("/**"):
+        clean_entry = clean_entry[:-3]
+    elif clean_entry.endswith("/*"):
+        clean_entry = clean_entry[:-2]
+
     # Directory prefix match: ensure entry ends with '/' for clean prefix matching
-    dir_prefix = entry_norm if entry_norm.endswith("/") else entry_norm + "/"
+    dir_prefix = clean_entry if clean_entry.endswith("/") else clean_entry + "/"
     if file_norm.startswith(dir_prefix):
         return True
+
+    # Wildcard glob matching (e.g. *.md, tests/test_*.py)
+    import fnmatch
+    if "*" in entry_norm or "?" in entry_norm:
+        if fnmatch.fnmatch(file_norm, entry_norm):
+            return True
 
     return False
 
