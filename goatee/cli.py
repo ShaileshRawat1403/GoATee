@@ -165,9 +165,12 @@ def cmd_approve(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # 5. Record baseline commit in change.md
+    # 5. Record baseline commit and contract hash in change.md
+    from goatee.core.parser import compute_contract_hash
     update_contract_state(change_file, "Baseline-Commit", baseline_sha)
-    print(f"Approved change '{change_id}' and locked baseline commit: {baseline_sha}")
+    c_hash = compute_contract_hash(change_file.read_text(encoding="utf-8"))
+    update_contract_state(change_file, "Contract-SHA256", c_hash)
+    print(f"Approved change '{change_id}' and locked baseline commit: {baseline_sha} (contract hash: {c_hash[:8]})")
     return 0
 
 
@@ -365,6 +368,22 @@ def cmd_verify(args: argparse.Namespace) -> int:
             file=sys.stderr
         )
         return 1
+
+    # Check contract tamper integrity
+    from goatee.core.parser import compute_contract_hash, read_contract_hash
+    locked_hash = read_contract_hash(change_file)
+    if locked_hash:
+        current_hash = compute_contract_hash(change_file.read_text(encoding="utf-8"))
+        if current_hash != locked_hash:
+            print(
+                f"CONTRACT INTEGRITY VIOLATION:\n"
+                f"Change contract '{change_id}' has been modified after human approval.\n"
+                f"Approved hash: {locked_hash}\n"
+                f"Current hash:  {current_hash}\n"
+                "Verification halted closed: unauthorized agreement or budget modification.",
+                file=sys.stderr
+            )
+            return 1
 
     # 4. Run Verification Engine
     from goatee.core.verifier import verify_change, render_receipt_markdown
@@ -596,6 +615,172 @@ def cmd_attest(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_amend(args: argparse.Namespace) -> int:
+    """Legitimately amend an approved Build Budget by adding surface with human attribution and rationale."""
+    try:
+        change_id = resolve_or_fail_change_id(args.change_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    if not args.add_surface:
+        print("Error: --add-surface <path> is required to amend budget.", file=sys.stderr)
+        return 1
+
+    if not args.note or not args.note.strip():
+        print("Error: --note <rationale> is required for budget amendment.", file=sys.stderr)
+        return 1
+
+    from goatee.core.attest import normalize_note, get_git_reviewer, ControlStateError
+    try:
+        clean_note = normalize_note(args.note)
+    except ControlStateError as cse:
+        print(f"Error: {cse}", file=sys.stderr)
+        return 1
+
+    cwd = Path.cwd()
+    change_file = cwd / ".goatee" / "changes" / change_id / "change.md"
+    if not change_file.is_file():
+        print(f"Error: Change contract not found at {change_file}", file=sys.stderr)
+        return 1
+
+    content = change_file.read_text(encoding="utf-8")
+    try:
+        contract = parse_change_contract(change_file)
+    except ContractSyntaxError as cse:
+        print(f"Contract syntax error:\n{cse}", file=sys.stderr)
+        return 1
+
+    if not contract.contract_state.baseline_commit:
+        print(f"Error: Change '{change_id}' is not yet approved. Edit change.md directly before approval.", file=sys.stderr)
+        return 1
+
+    try:
+        reviewer_name, reviewer_email = get_git_reviewer(cwd)
+    except Exception:
+        reviewer_name, reviewer_email = "Unknown", "unknown@localhost"
+
+    from datetime import datetime, timezone
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+    new_surface_path = args.add_surface.strip()
+
+    # Insert under ### Expected Surface
+    lines = content.splitlines()
+    new_lines = []
+    inserted_surface = False
+    in_exp_surface = False
+
+    for line in lines:
+        if line.strip() == "### Expected Surface":
+            in_exp_surface = True
+            new_lines.append(line)
+            continue
+
+        if in_exp_surface:
+            if line.startswith("### ") or line.startswith("## ") or (":" in line and not line.startswith(" ")):
+                if not inserted_surface:
+                    new_lines.append(f"- {new_surface_path}")
+                    inserted_surface = True
+                in_exp_surface = False
+
+        new_lines.append(line)
+
+    if in_exp_surface and not inserted_surface:
+        new_lines.append(f"- {new_surface_path}")
+        inserted_surface = True
+
+    content_with_surface = "\n".join(new_lines)
+
+    # Append to ## Amendments section
+    amend_entry = f"- [{now_utc}] Added surface '{new_surface_path}' (Attributed to {reviewer_name} <{reviewer_email}>; Reason: {clean_note})"
+    if "## Amendments" in content_with_surface:
+        content_with_surface = content_with_surface.replace("## Amendments", f"## Amendments\n{amend_entry}")
+    else:
+        state_header = "## Contract State"
+        if state_header in content_with_surface:
+            content_with_surface = content_with_surface.replace(state_header, f"## Amendments\n{amend_entry}\n\n{state_header}")
+        else:
+            content_with_surface += f"\n\n## Amendments\n{amend_entry}\n"
+
+    change_file.write_text(content_with_surface + "\n", encoding="utf-8")
+
+    # Re-compute and update Contract-SHA256
+    from goatee.core.parser import compute_contract_hash, update_contract_state
+    new_hash = compute_contract_hash(change_file.read_text(encoding="utf-8"))
+    update_contract_state(change_file, "Contract-SHA256", new_hash)
+
+    print(f"Amended Build Budget for '{change_id}': added '{new_surface_path}' to Expected Surface.")
+    print(f"New Contract-SHA256 locked: {new_hash[:8]}")
+    print("Notice: Commit change.md to lock this amendment in Git history.")
+    return 0
+
+
+def cmd_hook(args: argparse.Namespace) -> int:
+    """Manage Git pre-commit guardrail hooks."""
+    cwd = Path.cwd()
+    res = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True, cwd=cwd)
+    if res.returncode != 0 or res.stdout.strip() != "true":
+        print("Error: Not inside a valid Git repository.", file=sys.stderr)
+        return 1
+
+    git_dir_res = subprocess.run(["git", "rev-parse", "--git-dir"], capture_output=True, text=True, cwd=cwd)
+    git_dir = cwd / git_dir_res.stdout.strip()
+    hooks_dir = git_dir / "hooks"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
+    pre_commit_path = hooks_dir / "pre-commit"
+
+    HOOK_MARKER = "# GoATee Pre-Commit Guardrail"
+    HOOK_SCRIPT = f"""#!/bin/sh
+{HOOK_MARKER}
+# Automatically check uncommitted working tree against approved GoATee Build Budget
+python3 -m goatee.cli check
+"""
+
+    action = getattr(args, "hook_action", "")
+
+    if action == "install":
+        import stat
+        if pre_commit_path.is_file():
+            content = pre_commit_path.read_text(encoding="utf-8")
+            if HOOK_MARKER in content:
+                print(f"GoATee pre-commit hook is already installed at {pre_commit_path}.")
+                return 0
+            pre_commit_path.write_text(content.rstrip() + f"\n\n{HOOK_MARKER}\npython3 -m goatee.cli check\n", encoding="utf-8")
+        else:
+            pre_commit_path.write_text(HOOK_SCRIPT, encoding="utf-8")
+
+        pre_commit_path.chmod(pre_commit_path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+        print(f"Installed GoATee pre-commit guardrail hook at {pre_commit_path}.")
+        return 0
+
+    elif action == "uninstall":
+        if not pre_commit_path.is_file():
+            print("No pre-commit hook installed.", file=sys.stderr)
+            return 0
+
+        content = pre_commit_path.read_text(encoding="utf-8")
+        if HOOK_MARKER not in content:
+            print("No GoATee guardrail found in pre-commit hook.", file=sys.stderr)
+            return 0
+
+        if content.strip() == HOOK_SCRIPT.strip():
+            pre_commit_path.unlink()
+            print(f"Uninstalled GoATee pre-commit hook from {pre_commit_path}.")
+        else:
+            cleaned = "\n".join(
+                l for l in content.splitlines()
+                if HOOK_MARKER not in l and "python3 -m goatee.cli check" not in l
+            )
+            pre_commit_path.write_text(cleaned.strip() + "\n", encoding="utf-8")
+            print(f"Removed GoATee guardrail from {pre_commit_path}.")
+        return 0
+
+    else:
+        print(f"Unknown hook action: {action}", file=sys.stderr)
+        return 1
+
+
 class GoateeArgumentParser(argparse.ArgumentParser):
     """Custom argument parser enforcing conditional sub-command validation."""
     def parse_args(self, args=None, namespace=None):
@@ -667,6 +852,21 @@ def build_parser() -> argparse.ArgumentParser:
     # mcp
     p_mcp = subparsers.add_parser("mcp", help="Run standard Model Context Protocol (MCP) server over stdio")
     p_mcp.set_defaults(func=cmd_mcp)
+
+    # amend
+    p_amend = subparsers.add_parser("amend", help="Amend an approved Build Budget with human rationale")
+    p_amend.add_argument("change_id", nargs="?", help="Identifier of the change to amend (inferred if omitted)")
+    p_amend.add_argument("--add-surface", required=True, help="New file or directory path to add to Expected Surface")
+    p_amend.add_argument("--note", required=True, help="Mandatory rationale for expanding the budget")
+    p_amend.set_defaults(func=cmd_amend)
+
+    # hook
+    p_hook = subparsers.add_parser("hook", help="Manage GoATee Git guardrail hooks")
+    hook_sub = p_hook.add_subparsers(dest="hook_action", required=True)
+    p_hook_in = hook_sub.add_parser("install", help="Install pre-commit budget guardrail hook")
+    p_hook_in.set_defaults(func=cmd_hook)
+    p_hook_un = hook_sub.add_parser("uninstall", help="Uninstall pre-commit guardrail hook")
+    p_hook_un.set_defaults(func=cmd_hook)
 
     return parser
 

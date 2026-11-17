@@ -63,6 +63,39 @@ TOOLS_DEFINITIONS: List[Dict[str, Any]] = [
                 }
             }
         }
+    },
+    {
+        "name": "goatee_propose_budget",
+        "description": "Propose or update the technical Build Budget (expected surface, reuse strategy, dependency policy, and blast radius) for a change contract in DRAFT status.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {
+                    "type": "string",
+                    "description": "Identifier of the change. If omitted, automatically resolves active change."
+                },
+                "expected_surface": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of files or directories expected to be modified or created."
+                },
+                "reuse_strategy": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of existing components or patterns to reuse."
+                },
+                "dependency_policy": {
+                    "type": "string",
+                    "description": "Dependency policy statement (e.g. 'No new runtime dependencies')."
+                },
+                "blast_radius": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of sensitive/protected paths that must remain untouched."
+                }
+            },
+            "required": ["expected_surface"]
+        }
     }
 ]
 
@@ -231,6 +264,82 @@ def handle_get_status(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
             }
 
 
+def handle_propose_budget(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
+    change_id = args.get("change_id") or resolve_active_change_id(root)
+    if not change_id:
+        return {
+            "content": [{"type": "text", "text": "Error: No change-id provided and active change could not be uniquely inferred."}],
+            "isError": True
+        }
+
+    contract_path = root / ".goatee" / "changes" / change_id / "change.md"
+    if not contract_path.is_file():
+        return {
+            "content": [{"type": "text", "text": f"Error: Change contract not found for '{change_id}' at {contract_path}."}],
+            "isError": True
+        }
+
+    try:
+        contract = parse_change_contract(contract_path)
+    except ContractSyntaxError as cse:
+        return {
+            "content": [{"type": "text", "text": f"Contract syntax error in '{change_id}': {cse}"}],
+            "isError": True
+        }
+
+    if contract.contract_state.budget_status == "APPROVED" and contract.contract_state.baseline_commit:
+        return {
+            "content": [{"type": "text", "text": f"Error: Change '{change_id}' already has an APPROVED budget and locked baseline commit. Use 'goatee amend' for post-approval amendments."}],
+            "isError": True
+        }
+
+    expected_surface = args.get("expected_surface", [])
+    reuse_strategy = args.get("reuse_strategy", [])
+    dependency_policy = args.get("dependency_policy", "No new runtime dependencies")
+    blast_radius = args.get("blast_radius", [])
+
+    content = contract_path.read_text(encoding="utf-8")
+    budget_idx = content.find("## Build Budget")
+    state_idx = content.find("## Contract State")
+    if budget_idx == -1 or state_idx == -1:
+        return {
+            "content": [{"type": "text", "text": "Error: Malformed contract: missing ## Build Budget or ## Contract State section."}],
+            "isError": True
+        }
+
+    exp_str = "\n".join(f"- {s}" for s in expected_surface) or "- (none)"
+    reuse_str = "\n".join(f"- {r}" for r in reuse_strategy) or "- (none)"
+    blast_str = "\n".join(f"- {b}" for b in blast_radius) or "- (none)"
+
+    new_budget_section = (
+        "## Build Budget\n\n"
+        "### Expected Surface\n"
+        f"{exp_str}\n\n"
+        "### Reuse Strategy\n"
+        f"{reuse_str}\n\n"
+        f"Dependency-Policy: {dependency_policy}\n\n"
+        "### Blast Radius\n"
+        f"{blast_str}\n\n"
+    )
+
+    new_content = content[:budget_idx] + new_budget_section + content[state_idx:]
+    contract_path.write_text(new_content, encoding="utf-8")
+
+    return {
+        "content": [{
+            "type": "text",
+            "text": (
+                f"Proposed Build Budget updated for '{change_id}':\n"
+                f"- Expected Surface: {len(expected_surface)} path(s)\n"
+                f"- Blast Radius: {len(blast_radius)} path(s)\n"
+                f"- Dependency Policy: {dependency_policy}\n"
+                "Next step: Human must inspect and approve the budget before implementation."
+            )
+        }],
+        "isError": False
+    }
+
+
 def process_mcp_message(message: Dict[str, Any], root: Path) -> Optional[Dict[str, Any]]:
     """Process a single JSON-RPC 2.0 message according to MCP specification."""
     req_id = message.get("id")
@@ -287,6 +396,8 @@ def process_mcp_message(message: Dict[str, Any], root: Path) -> Optional[Dict[st
             result = handle_check_budget(arguments, root)
         elif tool_name == "goatee_get_status":
             result = handle_get_status(arguments, root)
+        elif tool_name == "goatee_propose_budget":
+            result = handle_propose_budget(arguments, root)
         else:
             return {
                 "jsonrpc": "2.0",

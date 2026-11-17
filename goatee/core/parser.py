@@ -1,8 +1,9 @@
 """Narrow key-value metadata and structured Markdown parser using standard library only."""
 
+import hashlib
 import re
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 from goatee.core.models import AcceptanceCriterion, BuildBudget, ChangeContract, ContractState
 
 
@@ -204,3 +205,35 @@ def update_contract_state(path: Path, key: str, value: str) -> None:
             new_lines.append(f"{key}: {value}")
 
     path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
+
+
+def compute_contract_hash(content: Union[str, Path]) -> str:
+    """Compute deterministic SHA-256 hash over canonical contract agreement content.
+
+    Excludes mutable state fields (Baseline-Commit, Contract-SHA256).
+    Normalizes line-level whitespace to prevent CRLF or indentation jitter.
+    Accepts either raw contract text string or Path to contract file.
+    """
+    if isinstance(content, Path):
+        content = content.read_text(encoding="utf-8")
+    lines = []
+    for line in content.splitlines():
+        trimmed = line.strip()
+        if trimmed.startswith("Baseline-Commit:") or trimmed.startswith("Contract-SHA256:"):
+            continue
+        lines.append(trimmed)
+    canonical = "\n".join(lines).strip()
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def read_contract_hash(path: Path) -> Optional[str]:
+    """Read Contract-SHA256 from ## Contract State if present in change.md."""
+    if not path.is_file():
+        return None
+    content = path.read_text(encoding="utf-8")
+    state_idx = content.find("## Contract State")
+    if state_idx == -1:
+        return None
+    meta = parse_metadata_block(content[state_idx:])
+    val = meta.get("Contract-SHA256", "").strip()
+    return val if val else None

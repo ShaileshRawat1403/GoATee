@@ -108,6 +108,7 @@ Baseline-Commit: {self.baseline_sha}
         self.assertIn("goatee_get_contract", tool_names)
         self.assertIn("goatee_check_budget", tool_names)
         self.assertIn("goatee_get_status", tool_names)
+        self.assertIn("goatee_propose_budget", tool_names)
 
     def test_call_get_contract(self):
         req = {
@@ -165,6 +166,89 @@ Baseline-Commit: {self.baseline_sha}
         resp2 = json.loads(lines[1])
         self.assertEqual(resp1["id"], 10)
         self.assertEqual(resp2["id"], 11)
+
+    def test_propose_budget_success_for_draft(self):
+        draft_dir = self.repo_root / ".goatee" / "changes" / "002-draft"
+        draft_dir.mkdir(parents=True)
+        draft_content = f"""# Change: 002-draft
+
+## Intent
+Draft test.
+
+## Agreed Scope
+### In Scope
+- Work
+
+### Out of Scope
+- None
+
+## Acceptance Criteria
+- AC-01: Check
+  Evidence:
+    type: automated
+    command: echo ok
+    expected: exit 0
+
+## Build Budget
+### Expected Surface
+- (none)
+
+### Reuse Strategy
+- (none)
+
+Dependency-Policy: No new runtime dependencies
+
+### Blast Radius
+- (none)
+
+## Contract State
+Agreement-Status: DRAFT
+Budget-Status: DRAFT
+Baseline-Commit: 
+"""
+        (draft_dir / "change.md").write_text(draft_content, encoding="utf-8")
+
+        req = {
+            "jsonrpc": "2.0",
+            "id": 20,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_propose_budget",
+                "arguments": {
+                    "change_id": "002-draft",
+                    "expected_surface": ["src/new_feature.py", "tests/test_new.py"],
+                    "reuse_strategy": ["Existing auth helper"],
+                    "blast_radius": ["sensitive/keys.py"]
+                }
+            }
+        }
+        resp = process_mcp_message(req, self.repo_root)
+        self.assertIsNotNone(resp)
+        self.assertFalse(resp["result"]["isError"])
+        self.assertIn("Proposed Build Budget updated", resp["result"]["content"][0]["text"])
+
+        updated_contract = (draft_dir / "change.md").read_text(encoding="utf-8")
+        self.assertIn("- src/new_feature.py", updated_contract)
+        self.assertIn("- tests/test_new.py", updated_contract)
+        self.assertIn("- sensitive/keys.py", updated_contract)
+
+    def test_propose_budget_refused_when_approved(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_propose_budget",
+                "arguments": {
+                    "change_id": "001-mcp",
+                    "expected_surface": ["src/rogue.py"]
+                }
+            }
+        }
+        resp = process_mcp_message(req, self.repo_root)
+        self.assertIsNotNone(resp)
+        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("already has an APPROVED budget", resp["result"]["content"][0]["text"])
 
 
 if __name__ == "__main__":

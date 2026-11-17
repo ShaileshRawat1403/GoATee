@@ -433,9 +433,10 @@ It then records:
 
 ```text
 Baseline-Commit: <git-sha>
+Contract-SHA256: <sha256-hash>
 ```
 
-That SHA becomes the reference point for the delivery.
+That baseline SHA and cryptographic contract hash lock the reference point and agreement boundary. Any subsequent unauthorized edits to the contract (such as an agent secretly expanding the Expected Surface) will cause verification to fail closed.
 
 The build can now begin.
 
@@ -492,6 +493,34 @@ GoATee reports:
 
 ---
 
+## Git pre-commit guardrail hook
+
+To prevent accidental commits that violate the approved Build Budget, GoATee can install an automatic Git pre-commit hook:
+
+```bash
+# Install zero-dependency pre-commit hook
+goatee hook install
+
+# Or remove it
+goatee hook uninstall
+```
+
+Whenever `git commit` is invoked, the hook executes `goatee check` in the background. If unapproved surface deviations or protected blast-radius files are touched, the commit is blocked automatically.
+
+---
+
+## Amend the build budget
+
+If implementation reveals that scope genuinely needs to expand (the I-6 -> I-5 loop), a human must explicitly approve the budget amendment:
+
+```bash
+goatee amend 001-export-csv --add-surface src/utils/csv_helper.py --note "Needed extra utility for CSV escaping"
+```
+
+GoATee records the new surface in `change.md`, logs the attribution and rationale in `## Amendments`, and re-computes `Contract-SHA256`. Agents cannot amend budgets; amendments require explicit human action.
+
+---
+
 ## Inspect status
 
 `goatee status` provides read-only visibility into the control plane without modifying repository state or files:
@@ -541,6 +570,7 @@ goatee mcp
 
 Exposed MCP tools:
 - `goatee_get_contract`: Fetch governing change contract, intent, acceptance criteria, and build budget.
+- `goatee_propose_budget`: Allow coding agents to draft/update the Build Budget section before human approval.
 - `goatee_check_budget`: Pre-flight check on current working tree changes.
 - `goatee_get_status`: Project overview or detailed change report.
 
