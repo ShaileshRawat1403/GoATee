@@ -965,6 +965,7 @@ def cmd_ci(args: argparse.Namespace) -> int:
     allow_needs_review = getattr(args, "allow_needs_review", False)
     all_changes = getattr(args, "all", False)
     json_mode = getattr(args, "json", False)
+    write_receipt = getattr(args, "write_receipt", False)
 
     res = run_ci(
         root=root,
@@ -972,6 +973,7 @@ def cmd_ci(args: argparse.Namespace) -> int:
         allow_needs_review=allow_needs_review,
         all_changes=all_changes,
         write_step_summary=True,
+        write_receipt=write_receipt,
     )
 
     if json_mode:
@@ -1044,6 +1046,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_ci.add_argument("change_id", nargs="?", help="Identifier of the change to verify (inferred if omitted)")
     p_ci.add_argument("--all", action="store_true", help="Verify all unarchived approved changes")
     p_ci.add_argument("--allow-needs-review", action="store_true", help="Exit code 0 if automated checks pass and manual review is pending")
+    p_ci.add_argument("--write-receipt", action="store_true", help="Write compiled receipt.md to change directory")
     p_ci.add_argument("--json", action="store_true", help="Output CI results as JSON")
     p_ci.add_argument("--output-summary", help="Path to write the markdown summary file")
     p_ci.set_defaults(func=cmd_ci)

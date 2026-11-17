@@ -53,6 +53,7 @@ def run_ci(
     allow_needs_review: bool = False,
     all_changes: bool = False,
     write_step_summary: bool = True,
+    write_receipt: bool = False,
 ) -> CIRunResult:
     """Execute complete GoATee CI verification pipeline across changes."""
     project_root = root or find_project_root()
@@ -261,10 +262,11 @@ def run_ci(
             has_fail = True
             continue
 
-        # Write delivery receipt
-        receipt_content = render_receipt_markdown(verif_res, template_path)
-        receipt_file = changes_dir / cid / "receipt.md"
-        receipt_file.write_text(receipt_content, encoding="utf-8")
+        # Write delivery receipt only if explicitly requested
+        if write_receipt:
+            receipt_content = render_receipt_markdown(verif_res, template_path)
+            receipt_file = changes_dir / cid / "receipt.md"
+            receipt_file.write_text(receipt_content, encoding="utf-8")
 
         # 6. Read human review if present
         human_verdict = None
