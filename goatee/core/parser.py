@@ -143,7 +143,7 @@ def parse_change_contract(path: Path) -> ChangeContract:
         raise ContractSyntaxError("Missing required field: 'Dependency-Policy:' in '## Build Budget'.")
 
     def extract_bullet_list(section_name: str, text: str) -> List[str]:
-        pattern = rf"###\s+{re.escape(section_name)}\s*\n(.*?)(?=\n###|\n[A-Za-z0-9_-]+:|\Z)"
+        pattern = rf"###\s+{re.escape(section_name)}\s*\n(.*?)(?=\n###|\n##|\n[A-Za-z0-9_-]+:|\Z)"
         match = re.search(pattern, text, re.DOTALL)
         if not match:
             return []
@@ -153,6 +153,9 @@ def parse_change_contract(path: Path) -> ChangeContract:
             if b_line.startswith("- "):
                 items.append(b_line[2:].strip())
         return items
+
+    scope_in = extract_bullet_list("In Scope", content)
+    scope_out = extract_bullet_list("Out of Scope", content)
 
     budget.expected_surface = extract_bullet_list("Expected Surface", budget_block)
     budget.reuse_strategy = extract_bullet_list("Reuse Strategy", budget_block)
@@ -168,6 +171,8 @@ def parse_change_contract(path: Path) -> ChangeContract:
     return ChangeContract(
         change_id=change_id,
         intent=intent,
+        agreed_scope_in=scope_in,
+        agreed_scope_out=scope_out,
         acceptance_criteria=criteria,
         build_budget=budget,
         contract_state=contract_state,
@@ -216,16 +221,23 @@ def update_contract_state(path: Path, key: str, value: str) -> None:
 def compute_contract_hash(content: Union[str, Path]) -> str:
     """Compute deterministic SHA-256 hash over canonical contract agreement content.
 
-    Excludes mutable state fields (Baseline-Commit, Contract-SHA256).
+    Excludes mutable state fields (Baseline-Commit, Contract-SHA256, Lifecycle-Status, Landed-At, Archived-At).
     Normalizes line-level whitespace to prevent CRLF or indentation jitter.
     Accepts either raw contract text string or Path to contract file.
     """
     if isinstance(content, Path):
         content = content.read_text(encoding="utf-8")
     lines = []
+    ignored_prefixes = (
+        "Baseline-Commit:",
+        "Contract-SHA256:",
+        "Lifecycle-Status:",
+        "Landed-At:",
+        "Archived-At:",
+    )
     for line in content.splitlines():
         trimmed = line.strip()
-        if trimmed.startswith("Baseline-Commit:") or trimmed.startswith("Contract-SHA256:"):
+        if any(trimmed.startswith(prefix) for prefix in ignored_prefixes):
             continue
         lines.append(trimmed)
     canonical = "\n".join(lines).strip()

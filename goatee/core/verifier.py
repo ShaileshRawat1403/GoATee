@@ -75,6 +75,8 @@ def get_git_visible_fingerprint(cwd: Optional[Path] = None) -> Dict[str, str]:
         path_part = line[3:].strip()
         if " -> " in path_part:
             path_part = path_part.split(" -> ")[1].strip()
+        from goatee.core.budget import unquote_git_path
+        path_part = unquote_git_path(path_part)
 
         target_file = base_dir / path_part
         if target_file.is_file():
@@ -437,8 +439,10 @@ def render_receipt_markdown(result: VerificationResult, template_path: Path) -> 
     # Coverage matrix lines
     matrix_lines = []
     for r in result.criterion_results:
+        decl_clean = r.declared.replace("|", "\\|")
+        obs_clean = r.observed.replace("|", "\\|")
         matrix_lines.append(
-            f"| **{r.criterion_id}** | {r.evidence_type} | `{r.declared}` | {r.observed} | **{r.status}** |"
+            f"| **{r.criterion_id}** | {r.evidence_type} | `{decl_clean}` | {obs_clean} | **{r.status}** |"
         )
     coverage_matrix = "\n".join(matrix_lines) or "| (none) | | | | |"
 

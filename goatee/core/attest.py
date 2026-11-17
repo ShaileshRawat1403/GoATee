@@ -417,7 +417,7 @@ def parse_review_markdown(review_path: Path) -> ReviewRecord:
         line = line.strip()
         if not line.startswith("|") or ":---" in line or "Criterion" in line:
             continue
-        parts = [p.strip() for p in line.split("|")]
+        parts = [p.replace(r"\|", "|").strip() for p in re.split(r"(?<!\\)\|", line)]
         # "| **AC-11** | manual | NEEDS_REVIEW | **VERIFIED** | Rev | Time | Note |" -> 9 parts
         if len(parts) >= 8:
             c_id = parts[1].replace("*", "").strip()

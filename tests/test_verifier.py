@@ -343,6 +343,34 @@ class TestVerifier(unittest.TestCase):
         self.assertFalse(is_timeout)
         self.assertEqual(code, 0)
 
+    def test_render_receipt_escapes_pipes(self):
+        """Rendered receipt markdown must escape pipes in commands and observations."""
+        from goatee.core.verifier import CriterionResult, VerificationResult
+        from goatee.core.budget import BudgetComparisonResult
+
+        template_path = Path(__file__).parent.parent / "goatee" / "templates" / "receipt.md"
+        result = VerificationResult(
+            change_id="001-pipe-render",
+            baseline_commit="1111111111111111",
+            verified_commit="2222222222222222",
+            budget_result=BudgetComparisonResult(expected_changes=["app.py"]),
+            criterion_results=[
+                CriterionResult(
+                    criterion_id="AC-01",
+                    evidence_type="automated",
+                    declared="cat file | grep foo",
+                    observed="result | with | pipes",
+                    status="VERIFIED"
+                )
+            ],
+            mutations=[],
+            verdict="PASS",
+            verified_at="2026-11-17 12:00:00Z"
+        )
+        md = render_receipt_markdown(result, template_path)
+        self.assertIn("cat file \\| grep foo", md)
+        self.assertIn("result \\| with \\| pipes", md)
+
 
 if __name__ == "__main__":
     unittest.main()

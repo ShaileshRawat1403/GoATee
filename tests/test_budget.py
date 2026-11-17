@@ -11,6 +11,7 @@ from goatee.core.budget import (
     matches_path_entry,
     is_control_artifact,
     normalize_relpath,
+    unquote_git_path,
     GitChange,
 )
 
@@ -271,6 +272,23 @@ class TestBudgetComparison(unittest.TestCase):
         self.assertTrue(matches_path_entry("goatee\\cli.py", "goatee/cli.py"))
         self.assertTrue(matches_path_entry("tests\\unit\\test_a.py", "tests/"))
         self.assertTrue(matches_path_entry("tests/unit/test_a.py", "tests\\"))
+
+    def test_unquote_git_path(self):
+        """Git-quoted paths (with spaces, tabs, quotes) must unquote cleanly."""
+        self.assertEqual(unquote_git_path('"src/my file.py"'), "src/my file.py")
+        self.assertEqual(unquote_git_path('regular/path.py'), "regular/path.py")
+        self.assertEqual(unquote_git_path('"path with spaces/file.txt"'), "path with spaces/file.txt")
+
+    def test_paths_with_spaces_and_quotes_matching(self):
+        """Paths with spaces and quotes must match expected surface accurately."""
+        budget = BuildBudget(
+            expected_surface=["src/my feature.py", "docs/notes.md"],
+            blast_radius=["secrets/key file.pem"]
+        )
+        res = compare_budget(['"src/my feature.py"', '"secrets/key file.pem"'], budget)
+        self.assertIn("src/my feature.py", res.expected_changes)
+        self.assertIn("secrets/key file.pem", res.protected_changes)
+        self.assertIn("secrets/key file.pem", res.surface_deviations)
 
 
 if __name__ == "__main__":

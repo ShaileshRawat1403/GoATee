@@ -130,6 +130,8 @@ def cmd_approve(args: argparse.Namespace) -> int:
         path_part = line[3:].strip()
         if " -> " in path_part:
             path_part = path_part.split(" -> ")[1].strip()
+        from goatee.core.budget import unquote_git_path
+        path_part = unquote_git_path(path_part)
         if not path_part.startswith(".goatee/"):
             uncommitted_app_changes.append(line)
 
@@ -794,10 +796,11 @@ def cmd_hook(args: argparse.Namespace) -> int:
     pre_commit_path = hooks_dir / "pre-commit"
 
     HOOK_MARKER = "# GoATee Pre-Commit Guardrail"
+    HOOK_INVOCATION = "if command -v goatee >/dev/null 2>&1; then goatee check; else python3 -m goatee.cli check; fi"
     HOOK_SCRIPT = f"""#!/bin/sh
 {HOOK_MARKER}
 # Automatically check uncommitted working tree against approved GoATee Build Budget
-python3 -m goatee.cli check
+{HOOK_INVOCATION}
 """
 
     action = getattr(args, "hook_action", "")
@@ -809,7 +812,7 @@ python3 -m goatee.cli check
             if HOOK_MARKER in content:
                 print(f"GoATee pre-commit hook is already installed at {pre_commit_path}.")
                 return 0
-            pre_commit_path.write_text(content.rstrip() + f"\n\n{HOOK_MARKER}\npython3 -m goatee.cli check\n", encoding="utf-8")
+            pre_commit_path.write_text(content.rstrip() + f"\n\n{HOOK_MARKER}\n{HOOK_INVOCATION}\n", encoding="utf-8")
         else:
             pre_commit_path.write_text(HOOK_SCRIPT, encoding="utf-8")
 

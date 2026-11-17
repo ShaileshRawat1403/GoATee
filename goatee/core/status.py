@@ -270,7 +270,7 @@ def parse_receipt(receipt_path: Path) -> ReceiptSnapshot:
         line = line.strip()
         if not line.startswith("|") or ":---" in line or "Criterion" in line:
             continue
-        parts = [p.strip() for p in line.split("|")]
+        parts = [p.replace(r"\|", "|").strip() for p in re.split(r"(?<!\\)\|", line)]
         # markdown table line "| **AC-01** | automated | `command` | result | **STATUS** |" has 7 elements when split
         if len(parts) >= 6:
             c_id = parts[1].replace("*", "").strip()

@@ -4,7 +4,13 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
-from goatee.core.parser import parse_change_contract, parse_metadata_block, update_contract_state, ContractSyntaxError
+from goatee.core.parser import (
+    parse_change_contract,
+    parse_metadata_block,
+    update_contract_state,
+    compute_contract_hash,
+    ContractSyntaxError,
+)
 
 
 SAMPLE_CHANGE_MD = """# Change: 001-export-csv
@@ -89,6 +95,10 @@ class TestParser(unittest.TestCase):
             self.assertEqual(contract.contract_state.agreement_status, "APPROVED")
             self.assertEqual(contract.contract_state.budget_status, "APPROVED")
             self.assertEqual(contract.contract_state.baseline_commit, "abc123def456")
+
+            # Agreed scope
+            self.assertEqual(contract.agreed_scope_in, ["Export button in header", "CSV generation"])
+            self.assertEqual(contract.agreed_scope_out, ["PDF export", "Background queue"])
 
             # Acceptance criteria
             self.assertEqual(len(contract.acceptance_criteria), 2)
@@ -244,6 +254,16 @@ class TestParser(unittest.TestCase):
             self.assertEqual(contract.contract_state.agreement_status, "DRAFT")
             self.assertEqual(contract.contract_state.budget_status, "DRAFT")
             self.assertIsNone(contract.contract_state.baseline_commit)
+
+    def test_compute_contract_hash_lifecycle_invariance(self):
+        """Contract hash must be invariant across lifecycle transitions (LANDED, Landed-At, Archived-At)."""
+        base_hash = compute_contract_hash(SAMPLE_CHANGE_MD)
+
+        landed_content = SAMPLE_CHANGE_MD + "\nLifecycle-Status: LANDED\nLanded-At: 2026-11-17 12:00:00Z\n"
+        self.assertEqual(compute_contract_hash(landed_content), base_hash)
+
+        archived_content = SAMPLE_CHANGE_MD + "\nLifecycle-Status: SUPERSEDED\nArchived-At: 2026-11-17 12:00:00Z\n"
+        self.assertEqual(compute_contract_hash(archived_content), base_hash)
 
 
 if __name__ == "__main__":

@@ -28,9 +28,20 @@ class BudgetComparisonResult:
     raw_changes: List[GitChange] = field(default_factory=list)
 
 
+def unquote_git_path(path_str: str) -> str:
+    """Safely strip Git C-style quotes from paths with spaces or special characters."""
+    p = path_str.strip()
+    if p.startswith('"') and p.endswith('"') and len(p) >= 2:
+        try:
+            return p[1:-1].encode("latin1").decode("unicode_escape")
+        except Exception:
+            return p[1:-1]
+    return p
+
+
 def normalize_relpath(path_str: str) -> str:
     """Normalize a path string into a clean relative POSIX path without leading slashes."""
-    p = path_str.strip().replace("\\", "/")
+    p = unquote_git_path(path_str).replace("\\", "/")
     while p.startswith("/"):
         p = p[1:]
     return p
@@ -57,9 +68,10 @@ def matches_path_entry(file_path: str, entry: str) -> bool:
     if not entry_norm:
         return False
 
-    # Ignore semantic entries (e.g. 'Phase 1 approval semantics', 'Metadata grammar')
-    # Valid path entries contain file extensions or slashes or match existing directory conventions
-    if " " in entry_norm and not entry_norm.startswith("./"):
+    # Ignore semantic safeguard entries (e.g. 'Phase 1 approval semantics (goatee approve)')
+    # Real paths contain path separators ('/'), start with './', or have file extensions.
+    import re
+    if " " in entry_norm and "/" not in entry_norm and not entry_norm.startswith("./") and not re.search(r"\.[a-zA-Z0-9_-]+$", entry_norm):
         return False
 
     # Exact file match
@@ -108,12 +120,12 @@ def get_git_changed_files(baseline: str, target: str = "HEAD", cwd: Optional[Pat
             continue
         status_raw = parts[0].strip()
         if status_raw.startswith("R"):
-            old_p = parts[1].strip() if len(parts) > 1 else ""
-            new_p = parts[2].strip() if len(parts) > 2 else ""
+            old_p = unquote_git_path(parts[1].strip()) if len(parts) > 1 else ""
+            new_p = unquote_git_path(parts[2].strip()) if len(parts) > 2 else ""
             changes.append(GitChange(status="R", path=new_p, old_path=old_p))
         elif len(parts) >= 2:
             status = status_raw[0] if status_raw else "M"
-            path = parts[1].strip()
+            path = unquote_git_path(parts[1].strip())
             changes.append(GitChange(status=status, path=path))
     return changes
 
@@ -144,14 +156,14 @@ def get_working_tree_changed_files(baseline: str, cwd: Optional[Path] = None) ->
             continue
         status_raw = parts[0].strip()
         if status_raw.startswith("R"):
-            old_p = parts[1].strip() if len(parts) > 1 else ""
-            new_p = parts[2].strip() if len(parts) > 2 else ""
+            old_p = unquote_git_path(parts[1].strip()) if len(parts) > 1 else ""
+            new_p = unquote_git_path(parts[2].strip()) if len(parts) > 2 else ""
             changes.append(GitChange(status="R", path=new_p, old_path=old_p))
             seen_paths.add(new_p)
             seen_paths.add(old_p)
         elif len(parts) >= 2:
             status = status_raw[0] if status_raw else "M"
-            path = parts[1].strip()
+            path = unquote_git_path(parts[1].strip())
             changes.append(GitChange(status=status, path=path))
             seen_paths.add(path)
 
@@ -168,7 +180,7 @@ def get_working_tree_changed_files(baseline: str, cwd: Optional[Path] = None) ->
     for line in status_res.stdout.splitlines():
         if not line.startswith("??"):
             continue
-        raw_path = line[3:].strip()
+        raw_path = unquote_git_path(line[3:].strip())
         if raw_path and raw_path not in seen_paths:
             changes.append(GitChange(status="A", path=raw_path))
             seen_paths.add(raw_path)

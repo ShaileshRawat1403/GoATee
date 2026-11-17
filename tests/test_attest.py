@@ -627,6 +627,47 @@ class TestAttest(unittest.TestCase):
         self.assertEqual((change_dir / "change.md").read_bytes(), change_bytes_before)
         self.assertEqual((self.repo / ".goatee" / "project.md").read_bytes(), project_bytes_before)
 
+    def test_parse_review_escaped_pipe_in_note(self):
+        """Review table parser must cleanly parse rows containing escaped pipe characters."""
+        review_md = """# Human Review: 001-pipe
+
+Change-ID: 001-pipe
+Review-Verdict: ACCEPTED
+Updated-At: 2026-11-17 12:00:00Z
+
+## Receipt Binding
+
+Verified-Commit: abc123def456
+Receipt-Commit: def456abc123
+Receipt-SHA256: 1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
+
+## Attestation Coverage Matrix
+
+| Criterion | Type | Machine Status | Human Attestation | Reviewer | Attested At | Note |
+| :--- | :---: | :---: | :---: | :--- | :--- | :--- |
+| **AC-01** | manual | NEEDS_REVIEW | **VERIFIED** | Alice <alice@test.dev> | 2026-11-17 12:00:00Z | Note with a \\| pipe character |
+
+## Review Event History
+
+- Event: 0001
+  Attested-At: 2026-11-17 12:00:00Z
+  Scope: criterion
+  Criterion: AC-01
+  Observation: VERIFIED
+  Reviewer-Name: Alice
+  Reviewer-Email: alice@test.dev
+  Attribution: Git-configured
+  Note: Note with a | pipe character
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            rev_p = Path(tmp) / "review.md"
+            rev_p.write_text(review_md, encoding="utf-8")
+            record = parse_review_markdown(rev_p)
+            self.assertEqual(record.verdict, "ACCEPTED")
+            self.assertEqual(len(record.rows), 1)
+            self.assertEqual(record.rows[0].criterion_id, "AC-01")
+            self.assertEqual(record.rows[0].note, "Note with a | pipe character")
+
 
 if __name__ == "__main__":
     unittest.main()

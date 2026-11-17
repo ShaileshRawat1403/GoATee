@@ -630,6 +630,54 @@ Verified-Commit: 2222222333333344444444555555556666666677
         self.assertIn("Human Review: PENDING", out_e)
         self.assertIn("(Acceptance blocked by machine evidence.)", out_e)
 
+    def test_parse_receipt_escaped_pipes(self):
+        """Receipt parser must cleanly handle cells containing escaped pipe characters."""
+        receipt_md = """# Delivery Receipt: 001-pipe
+
+Verdict: PASS
+Verified-At: 2026-11-17 12:00:00Z
+
+## Commit Provenance
+
+Baseline-Commit: 1234567890abcdef
+Verified-Commit: abcdef1234567890
+
+## Requirement Coverage Matrix
+
+| Criterion | Type | Declared Verification | Observed Result | Status |
+| :--- | :---: | :--- | :--- | :---: |
+| **AC-01** | automated | `cat file \\| grep foo` | output with \\| pipe | **VERIFIED** |
+
+## Build Budget & Surface Analysis
+
+### Expected Changes
+- src/app.py
+
+### Surface Deviations
+- (none)
+
+### Protected Changes
+- (none)
+
+## Git-Visible Mutation Report
+
+- Zero Git-visible repository mutations detected during verification.
+
+## Diagnostic Excerpt
+
+- No diagnostics recorded.
+"""
+        with tempfile.TemporaryDirectory() as tmp:
+            r_path = Path(tmp) / "receipt.md"
+            r_path.write_text(receipt_md, encoding="utf-8")
+            snapshot = parse_receipt(r_path)
+            self.assertEqual(snapshot.verdict, "PASS")
+            self.assertEqual(len(snapshot.rows), 1)
+            self.assertEqual(snapshot.rows[0].criterion_id, "AC-01")
+            self.assertEqual(snapshot.rows[0].declared, "`cat file | grep foo`")
+            self.assertEqual(snapshot.rows[0].observed, "output with | pipe")
+            self.assertEqual(snapshot.rows[0].status, "VERIFIED")
+
 
 if __name__ == "__main__":
     unittest.main()
