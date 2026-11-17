@@ -744,3 +744,170 @@ def record_attestation(
     )
 
     review_path.write_text(review_text, encoding="utf-8")
+
+
+def run_interactive_attestation(
+    repo_root: Path,
+    change_id: str,
+    input_fn=input,
+    output_fn=print,
+) -> int:
+    """Run an interactive wizard to record human attestation for pending criteria."""
+    root = find_project_root(repo_root)
+    check_clean_worktree(root)
+
+    change_dir = root / ".goatee" / "changes" / change_id
+    change_md_path = change_dir / "change.md"
+    if not change_md_path.is_file():
+        raise ControlStateError(f"Change '{change_id}' not found.")
+
+    try:
+        contract = parse_change_contract(change_md_path)
+    except ContractSyntaxError as e:
+        raise ControlStateError(f"Malformed contract in '{change_md_path}': {e}")
+
+    receipt, receipt_commit, receipt_sha256 = verify_receipt_prerequisites(change_dir, contract, root)
+    reviewer_name, reviewer_email = get_git_reviewer(root)
+
+    # Load existing review events if review.md exists
+    review_path = change_dir / "review.md"
+    existing_events: List[ReviewEvent] = []
+    if review_path.is_file():
+        existing_review = load_and_validate_review(change_dir, contract, receipt, root)
+        if existing_review:
+            existing_events = list(existing_review.events)
+
+    all_events = list(existing_events)
+    derived_verdict, current_rows = derive_review_state(contract, receipt, all_events)
+    row_map = {r.criterion_id: r for r in current_rows}
+    rec_row_map = {r.criterion_id: r for r in receipt.rows}
+
+    # Find criteria available for attestation:
+    # 1. Manual criteria where human_attestation != 'VERIFIED'
+    # 2. Automated criteria where machine_status != 'VERIFIED' and human_attestation != 'REJECTED'
+    pending_criteria = []
+    for ac in contract.acceptance_criteria:
+        row = row_map.get(ac.id)
+        current_human = row.human_attestation if row else "PENDING"
+        rec_row = rec_row_map.get(ac.id)
+        rec_status = rec_row.status if rec_row else "NEEDS_REVIEW"
+
+        if ac.evidence_type == "manual":
+            if current_human != "VERIFIED":
+                pending_criteria.append((ac, rec_status, current_human))
+        else:
+            if rec_status != "VERIFIED" and current_human != "REJECTED":
+                pending_criteria.append((ac, rec_status, current_human))
+
+    if not pending_criteria:
+        output_fn(f"All eligible criteria for change '{change_id}' are already attested.")
+        output_fn(f"Current Human Review Verdict: {derived_verdict}")
+        return 0
+
+    output_fn(f"\n=== Interactive Attestation: {change_id} ===")
+    output_fn(f"Reviewer: {reviewer_name} <{reviewer_email}> (Git-configured)")
+    output_fn(f"Found {len(pending_criteria)} criterion/criteria pending review.\n")
+
+    new_events_count = 0
+
+    for idx, (ac, machine_stat, human_stat) in enumerate(pending_criteria, 1):
+        output_fn(f"[{idx}/{len(pending_criteria)}] Criterion {ac.id} ({ac.evidence_type})")
+        output_fn(f"  Description: {ac.description}")
+        if ac.evidence_type == "manual":
+            output_fn(f"  Instruction: {ac.instruction}")
+        else:
+            output_fn(f"  Command: {ac.command} ({ac.expected})")
+        output_fn(f"  Machine Status: {machine_stat}")
+        output_fn(f"  Current Human State: {human_stat}")
+
+        choice = ""
+        while True:
+            if ac.evidence_type == "manual":
+                choice = input_fn("  Action ([v]erify / [r]eject / [s]kip / [q]uit): ").strip().lower()
+            else:
+                choice = input_fn("  Action ([r]eject / [s]kip / [q]uit): ").strip().lower()
+
+            if choice in ("q", "quit"):
+                output_fn("\nExiting interactive attestation.")
+                break
+            elif choice in ("s", "skip", ""):
+                output_fn("  -> Skipped.")
+                break
+            elif choice in ("v", "verify"):
+                if ac.evidence_type != "manual":
+                    output_fn("  Error: Automated criteria cannot be positively attested with 'verify'. Use 'reject' or 'skip'.")
+                    continue
+                note = input_fn("  Rationale note (single line): ").strip()
+                try:
+                    clean_note = normalize_note(note)
+                except ControlStateError as cse:
+                    output_fn(f"  Error: {cse}")
+                    continue
+
+                now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+                ev = ReviewEvent(
+                    sequence=len(all_events) + 1,
+                    attested_at=now_utc,
+                    scope="criterion",
+                    criterion_id=ac.id,
+                    observation="VERIFIED",
+                    reviewer_name=reviewer_name,
+                    reviewer_email=reviewer_email,
+                    attribution="Git-configured",
+                    note=clean_note,
+                )
+                all_events.append(ev)
+                new_events_count += 1
+                output_fn(f"  -> Recorded VERIFIED for {ac.id}.")
+                break
+            elif choice in ("r", "reject"):
+                note = input_fn("  Rejection rationale note (single line): ").strip()
+                try:
+                    clean_note = normalize_note(note)
+                except ControlStateError as cse:
+                    output_fn(f"  Error: {cse}")
+                    continue
+
+                now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+                ev = ReviewEvent(
+                    sequence=len(all_events) + 1,
+                    attested_at=now_utc,
+                    scope="criterion",
+                    criterion_id=ac.id,
+                    observation="REJECTED",
+                    reviewer_name=reviewer_name,
+                    reviewer_email=reviewer_email,
+                    attribution="Git-configured",
+                    note=clean_note,
+                )
+                all_events.append(ev)
+                new_events_count += 1
+                output_fn(f"  -> Recorded REJECTED for {ac.id}.")
+                break
+            else:
+                output_fn(f"  Invalid choice '{choice}'.")
+
+        if choice in ("q", "quit"):
+            break
+
+    if new_events_count > 0:
+        now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+        verdict, rows = derive_review_state(contract, receipt, all_events)
+        review_text = format_review_markdown(
+            change_id=change_id,
+            verdict=verdict,
+            updated_at=now_utc,
+            verified_commit=receipt.verified_commit,
+            receipt_commit=receipt_commit,
+            receipt_sha256=receipt_sha256,
+            rows=rows,
+            events=all_events,
+        )
+        review_path.write_text(review_text, encoding="utf-8")
+        output_fn(f"\nRecorded {new_events_count} new attestation event(s) in {review_path}.")
+        output_fn(f"Updated Human Review Verdict: {verdict}")
+        output_fn("Notice: Commit review.md to preserve these review records in Git history.")
+    else:
+        output_fn("\nNo new attestation events recorded.")
+
+    return 0

@@ -1,0 +1,171 @@
+"""Unit tests for pure standard library Model Context Protocol (MCP) stdio server."""
+
+import io
+import json
+import os
+import shutil
+import subprocess
+import tempfile
+import unittest
+from pathlib import Path
+
+from goatee.core.mcp import process_mcp_message, run_mcp_server
+
+
+class TestMCPServer(unittest.TestCase):
+    def setUp(self):
+        self.test_dir = tempfile.mkdtemp()
+        self.repo_root = Path(self.test_dir)
+
+        # Initialize git repo
+        subprocess.run(["git", "init"], cwd=self.repo_root, check=True, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test User"], cwd=self.repo_root, check=True)
+        subprocess.run(["git", "config", "user.email", "test@example.com"], cwd=self.repo_root, check=True)
+
+        (self.repo_root / "README.md").write_text("# Test Repo\n", encoding="utf-8")
+        subprocess.run(["git", "add", "README.md"], cwd=self.repo_root, check=True)
+        subprocess.run(["git", "commit", "-m", "initial commit"], cwd=self.repo_root, check=True, capture_output=True)
+
+        res = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.repo_root, check=True, capture_output=True, text=True)
+        self.baseline_sha = res.stdout.strip()
+
+        # Initialize GoATee project
+        goatee_dir = self.repo_root / ".goatee"
+        goatee_dir.mkdir()
+        (goatee_dir / "project.md").write_text("Project-Name: TestProj\n", encoding="utf-8")
+
+        # Create change
+        change_dir = goatee_dir / "changes" / "001-mcp"
+        change_dir.mkdir(parents=True)
+        self.change_dir = change_dir
+
+        contract_content = f"""# Change: 001-mcp
+
+## Intent
+Test MCP server tool calls.
+
+## Agreed Scope
+### In Scope
+- Work
+
+### Out of Scope
+- None
+
+## Acceptance Criteria
+- AC-01: Automated check
+  Evidence:
+    type: automated
+    command: python3 -c "print('ok')"
+    expected: exit 0
+
+## Build Budget
+### Expected Surface
+- src/app.py
+
+### Reuse Strategy
+- None
+
+Dependency-Policy: No new runtime dependencies
+
+### Blast Radius
+- None
+
+## Contract State
+Agreement-Status: APPROVED
+Budget-Status: APPROVED
+Baseline-Commit: {self.baseline_sha}
+"""
+        (change_dir / "change.md").write_text(contract_content, encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.test_dir, ignore_errors=True)
+
+    def test_initialize_handshake(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {"protocolVersion": "2024-11-05"}
+        }
+        resp = process_mcp_message(req, self.repo_root)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["id"], 1)
+        self.assertEqual(resp["result"]["serverInfo"]["name"], "goatee")
+        self.assertIn("tools", resp["result"]["capabilities"])
+
+    def test_tools_list(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {}
+        }
+        resp = process_mcp_message(req, self.repo_root)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["id"], 2)
+        tools = resp["result"]["tools"]
+        tool_names = [t["name"] for t in tools]
+        self.assertIn("goatee_get_contract", tool_names)
+        self.assertIn("goatee_check_budget", tool_names)
+        self.assertIn("goatee_get_status", tool_names)
+
+    def test_call_get_contract(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_get_contract",
+                "arguments": {"change_id": "001-mcp"}
+            }
+        }
+        resp = process_mcp_message(req, self.repo_root)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["id"], 3)
+        content_text = resp["result"]["content"][0]["text"]
+        data = json.loads(content_text)
+        self.assertEqual(data["change_id"], "001-mcp")
+        self.assertEqual(data["agreement_status"], "APPROVED")
+        self.assertIn("src/app.py", data["build_budget"]["expected_surface"])
+
+    def test_call_check_budget(self):
+        # Create unapproved file to trigger deviation
+        (self.repo_root / "deviant.py").write_text("# dev\n", encoding="utf-8")
+
+        req = {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_check_budget",
+                "arguments": {"change_id": "001-mcp"}
+            }
+        }
+        resp = process_mcp_message(req, self.repo_root)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp["id"], 4)
+        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("Pre-Flight Budget Check: FAILED", resp["result"]["content"][0]["text"])
+        self.assertIn("deviant.py", resp["result"]["content"][0]["text"])
+
+    def test_run_mcp_server_stdio(self):
+        input_lines = [
+            json.dumps({"jsonrpc": "2.0", "id": 10, "method": "ping"}),
+            json.dumps({"jsonrpc": "2.0", "id": 11, "method": "tools/list"}),
+        ]
+        stdin = io.StringIO("\n".join(input_lines) + "\n")
+        stdout = io.StringIO()
+
+        ret = run_mcp_server(stdin=stdin, stdout=stdout, repo_root=self.repo_root)
+        self.assertEqual(ret, 0)
+
+        lines = [line for line in stdout.getvalue().splitlines() if line.strip()]
+        self.assertEqual(len(lines), 2)
+        resp1 = json.loads(lines[0])
+        resp2 = json.loads(lines[1])
+        self.assertEqual(resp1["id"], 10)
+        self.assertEqual(resp2["id"], 11)
+
+
+if __name__ == "__main__":
+    unittest.main()

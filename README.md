@@ -471,6 +471,27 @@ Repository state becomes evidence.
 
 ---
 
+## Pre-flight budget check
+
+Before committing code or running verification, developers and coding agents can inspect uncommitted (staged and unstaged) working-tree modifications against the approved Build Budget:
+
+```bash
+# Check working tree against active change budget
+goatee check
+
+# Or specify a change explicitly
+goatee check 001-export-csv
+```
+
+GoATee reports:
+- files inside the `Expected Surface`
+- unapproved `Surface Deviations`
+- touches to protected `Blast Radius` paths
+
+`goatee check` has zero side effects: it does not create `receipt.md` or mutate Git state. If unapproved deviations or protected changes are touched, it exits with returncode `1`.
+
+---
+
 ## Inspect status
 
 `goatee status` provides read-only visibility into the control plane without modifying repository state or files:
@@ -489,13 +510,39 @@ Status reports the contract approval state, machine verification verdict, human 
 
 ## Record human attestation
 
-When a change contains manual acceptance criteria or requires human sign-off, `goatee attest` records human attestation into a separate, receipt-bound review artifact:
+When a change contains manual acceptance criteria or requires human sign-off, `goatee attest` records human attestation into a separate, receipt-bound review artifact.
+
+You can launch the interactive terminal wizard to step through pending criteria:
+
+```bash
+# Interactive wizard for active or specified change
+goatee attest -i
+# or
+goatee attest 001-export-csv --interactive
+```
+
+Or attest individual criteria directly via CLI flags:
 
 ```bash
 goatee attest 001-export-csv --criterion AC-02 --verified --note "Export button verified beside Filters"
 ```
 
 Attestation requires an existing machine receipt (`receipt.md`). It creates or appends to `.goatee/changes/<change-id>/review.md` without modifying `receipt.md`. Reviewer identity is attributed from local Git configuration (`user.name` and `user.email`).
+
+---
+
+## Connect coding agents via MCP
+
+GoATee includes a zero-dependency Model Context Protocol (MCP) server running over stdio, allowing AI coding assistants (such as Claude Code, Cursor, Windsurf, or Gemini CLI) to inspect boundaries autonomously:
+
+```bash
+goatee mcp
+```
+
+Exposed MCP tools:
+- `goatee_get_contract`: Fetch governing change contract, intent, acceptance criteria, and build budget.
+- `goatee_check_budget`: Pre-flight check on current working tree changes.
+- `goatee_get_status`: Project overview or detailed change report.
 
 ---
 

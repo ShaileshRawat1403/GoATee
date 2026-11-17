@@ -22,6 +22,18 @@ def validate_change_id(change_id: str) -> None:
         )
 
 
+def resolve_or_fail_change_id(raw_change_id: Optional[str]) -> str:
+    """Resolve change ID from argument or active repository context, validating format."""
+    from goatee.core.status import resolve_active_change_id
+    change_id = raw_change_id or resolve_active_change_id(Path.cwd())
+    if not change_id:
+        raise ValueError(
+            "No change-id specified and active change could not be uniquely inferred from Git branch or workspace. Specify <change-id>."
+        )
+    validate_change_id(change_id)
+    return change_id
+
+
 def cmd_init(args: argparse.Namespace) -> int:
     """Initialize .goatee/project.md in current directory."""
     cwd = Path.cwd()
@@ -74,13 +86,13 @@ def cmd_new(args: argparse.Namespace) -> int:
 def cmd_approve(args: argparse.Namespace) -> int:
     """Validate approved status, check clean repo state, and record baseline commit."""
     try:
-        validate_change_id(args.change_id)
+        change_id = resolve_or_fail_change_id(args.change_id)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
     cwd = Path.cwd()
-    change_file = cwd / ".goatee" / "changes" / args.change_id / "change.md"
+    change_file = cwd / ".goatee" / "changes" / change_id / "change.md"
 
     if not change_file.is_file():
         print(f"Error: Change contract not found at {change_file}", file=sys.stderr)
@@ -133,7 +145,7 @@ def cmd_approve(args: argparse.Namespace) -> int:
         return 1
     if contract.contract_state.baseline_commit:
         print(
-            f"Error: Change '{args.change_id}' already has a baseline commit: "
+            f"Error: Change '{change_id}' already has a baseline commit: "
             f"{contract.contract_state.baseline_commit}",
             file=sys.stderr
         )
@@ -155,20 +167,20 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
     # 5. Record baseline commit in change.md
     update_contract_state(change_file, "Baseline-Commit", baseline_sha)
-    print(f"Approved change '{args.change_id}' and locked baseline commit: {baseline_sha}")
+    print(f"Approved change '{change_id}' and locked baseline commit: {baseline_sha}")
     return 0
 
 
 def cmd_handoff(args: argparse.Namespace) -> int:
     """Render portable, model-agnostic handoff contract to stdout."""
     try:
-        validate_change_id(args.change_id)
+        change_id = resolve_or_fail_change_id(args.change_id)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
     cwd = Path.cwd()
-    change_file = cwd / ".goatee" / "changes" / args.change_id / "change.md"
+    change_file = cwd / ".goatee" / "changes" / change_id / "change.md"
 
     if not change_file.is_file():
         print(f"Error: Change contract not found at {change_file}", file=sys.stderr)
@@ -199,7 +211,7 @@ def cmd_handoff(args: argparse.Namespace) -> int:
     if not contract.contract_state.baseline_commit:
         print(
             "Error: Change has no Baseline-Commit recorded. "
-            f"Run 'goatee approve {args.change_id}' before handoff.",
+            f"Run 'goatee approve {change_id}' before handoff.",
             file=sys.stderr
         )
         return 1
@@ -281,13 +293,13 @@ def cmd_handoff(args: argparse.Namespace) -> int:
 def cmd_verify(args: argparse.Namespace) -> int:
     """Execute deterministic verification and compile delivery receipt.md."""
     try:
-        validate_change_id(args.change_id)
+        change_id = resolve_or_fail_change_id(args.change_id)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
     cwd = Path.cwd()
-    change_dir = cwd / ".goatee" / "changes" / args.change_id
+    change_dir = cwd / ".goatee" / "changes" / change_id
     change_file = change_dir / "change.md"
 
     if not change_file.is_file():
@@ -349,7 +361,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     if not contract.contract_state.baseline_commit:
         print(
             "Error: Change has no Baseline-Commit recorded. "
-            f"Run 'goatee approve {args.change_id}' before verification.",
+            f"Run 'goatee approve {change_id}' before verification.",
             file=sys.stderr
         )
         return 1
@@ -371,7 +383,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
     receipt_file = change_dir / "receipt.md"
     receipt_file.write_text(receipt_content, encoding="utf-8")
 
-    print(f"Verification complete for '{args.change_id}'.")
+    print(f"Verification complete for '{change_id}'.")
     print(f"Verdict: {result.verdict}")
     print(f"Delivery receipt compiled at {receipt_file}")
 
@@ -428,16 +440,112 @@ def cmd_status(args: argparse.Namespace) -> int:
             return 1
 
 
-def cmd_attest(args: argparse.Namespace) -> int:
-    """Record human attestation into review.md."""
+def cmd_check(args: argparse.Namespace) -> int:
+    """Pre-flight budget inspection of working tree changes against approved expected surface and blast radius."""
     try:
-        validate_change_id(args.change_id)
+        change_id = resolve_or_fail_change_id(args.change_id)
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
-    if args.verified and not args.criterion:
-        print("Error: --verified requires --criterion.", file=sys.stderr)
+    cwd = Path.cwd()
+    change_file = cwd / ".goatee" / "changes" / change_id / "change.md"
+
+    if not change_file.is_file():
+        print(f"Error: Change contract not found at {change_file}", file=sys.stderr)
+        return 1
+
+    # 1. Check Git repository
+    res = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], capture_output=True, text=True, cwd=cwd)
+    if res.returncode != 0 or res.stdout.strip() != "true":
+        print("Error: Not inside a valid Git repository.", file=sys.stderr)
+        return 1
+
+    # 2. Parse contract
+    try:
+        contract = parse_change_contract(change_file)
+    except ContractSyntaxError as cse:
+        print(f"Contract syntax error:\n{cse}", file=sys.stderr)
+        return 1
+
+    baseline = contract.contract_state.baseline_commit
+    if not baseline:
+        print(
+            f"Error: Change '{change_id}' has no Baseline-Commit locked. "
+            f"Run 'goatee approve {change_id}' before checking budget.",
+            file=sys.stderr
+        )
+        return 1
+
+    if not contract.build_budget:
+        print(f"Error: Change '{change_id}' has no Build Budget declared.", file=sys.stderr)
+        return 1
+
+    # 3. Compare working tree against budget
+    from goatee.core.budget import get_working_tree_changed_files, compare_budget, GitInspectionError
+    try:
+        changed_files = get_working_tree_changed_files(baseline, cwd=cwd)
+        comparison = compare_budget(changed_files, contract.build_budget)
+    except GitInspectionError as gie:
+        print(f"GIT INSPECTION FAILED:\n{gie}", file=sys.stderr)
+        return 1
+
+    total_changes = len(comparison.expected_changes) + len(comparison.surface_deviations) + len(comparison.protected_changes)
+    print(f"# Pre-Flight Budget Check: {change_id}")
+    print(f"Baseline: {baseline}")
+    print(f"Working Tree Changes: {total_changes}")
+    print()
+
+    print(f"Expected Changes: {len(comparison.expected_changes)}")
+    if comparison.expected_changes:
+        for f in comparison.expected_changes:
+            print(f"- {f}")
+    else:
+        print("- (none)")
+    print()
+
+    print("Surface Deviations:")
+    if comparison.surface_deviations:
+        for f in comparison.surface_deviations:
+            print(f"- {f}")
+    else:
+        print("- (none)")
+    print()
+
+    print("Protected Changes:")
+    if comparison.protected_changes:
+        for f in comparison.protected_changes:
+            print(f"- {f}")
+    else:
+        print("- (none)")
+    print()
+
+    if comparison.ignored_control_files:
+        print(f"Ignored Control Files: {len(comparison.ignored_control_files)}")
+        for f in comparison.ignored_control_files:
+            print(f"- {f}")
+        print()
+
+    if comparison.surface_deviations or comparison.protected_changes:
+        print("PRE-FLIGHT CHECK FAILED: Working tree contains unapproved deviations or touches protected changes.", file=sys.stderr)
+        return 1
+
+    print("PRE-FLIGHT CHECK PASSED: Working tree is within approved Build Budget.")
+    return 0
+
+
+def cmd_mcp(args: argparse.Namespace) -> int:
+    """Launch pure standard-library Model Context Protocol (MCP) server over stdio."""
+    from goatee.core.mcp import run_mcp_server
+    return run_mcp_server(repo_root=Path.cwd())
+
+
+def cmd_attest(args: argparse.Namespace) -> int:
+    """Record human attestation into review.md."""
+    try:
+        change_id = resolve_or_fail_change_id(args.change_id)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         return 1
 
     from goatee.core.status import (
@@ -447,27 +555,65 @@ def cmd_attest(args: argparse.Namespace) -> int:
     from goatee.core.parser import ContractSyntaxError
 
     cwd = Path.cwd()
+
+    if getattr(args, "interactive", False):
+        from goatee.core.attest import run_interactive_attestation
+        try:
+            return run_interactive_attestation(cwd, change_id)
+        except (ControlStateError, ReceiptSyntaxError, ContractSyntaxError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
+
+    # Non-interactive mode requires --note and either --verified or --rejected
+    if not args.note:
+        print("Error: --note is required in non-interactive mode.", file=sys.stderr)
+        return 1
+
+    if not args.verified and not args.rejected:
+        print("Error: Exactly one of --verified or --rejected must be specified in non-interactive mode.", file=sys.stderr)
+        return 1
+
+    if args.verified and not args.criterion:
+        print("Error: --verified requires --criterion.", file=sys.stderr)
+        return 1
+
     try:
         from goatee.core.attest import record_attestation
         record_attestation(
             repo_root=cwd,
-            change_id=args.change_id,
+            change_id=change_id,
             criterion_id=args.criterion,
             verified=args.verified,
             rejected=args.rejected,
             note=args.note,
         )
         action_str = "VERIFIED" if args.verified else "REJECTED"
-        target_str = f"criterion '{args.criterion}'" if args.criterion else f"change '{args.change_id}'"
-        print(f"Recorded {action_str} attestation for {target_str} in .goatee/changes/{args.change_id}/review.md")
+        target_str = f"criterion '{args.criterion}'" if args.criterion else f"change '{change_id}'"
+        print(f"Recorded {action_str} attestation for {target_str} in .goatee/changes/{change_id}/review.md")
         return 0
     except (ControlStateError, ReceiptSyntaxError, ContractSyntaxError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
 
 
+class GoateeArgumentParser(argparse.ArgumentParser):
+    """Custom argument parser enforcing conditional sub-command validation."""
+    def parse_args(self, args=None, namespace=None):
+        parsed = super().parse_args(args=args, namespace=namespace)
+        if getattr(parsed, "command", None) == "attest":
+            if getattr(parsed, "interactive", False):
+                if getattr(parsed, "verified", False) or getattr(parsed, "rejected", False):
+                    self.error("cannot combine --interactive with --verified or --rejected")
+            else:
+                if not getattr(parsed, "verified", False) and not getattr(parsed, "rejected", False):
+                    self.error("one of the arguments --verified --rejected is required (or use --interactive)")
+                if not getattr(parsed, "note", None):
+                    self.error("the following arguments are required: --note")
+        return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = GoateeArgumentParser(
         prog="goatee",
         description="GoATee: Spec and delivery control layer for AI-assisted software changes."
     )
@@ -484,18 +630,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     # approve
     p_approve = subparsers.add_parser("approve", help="Lock baseline commit after human agreement and budget approval")
-    p_approve.add_argument("change_id", help="Identifier of the change to approve")
+    p_approve.add_argument("change_id", nargs="?", help="Identifier of the change to approve (inferred if omitted)")
     p_approve.set_defaults(func=cmd_approve)
 
     # handoff
     p_handoff = subparsers.add_parser("handoff", help="Render portable handoff contract to stdout")
-    p_handoff.add_argument("change_id", help="Identifier of the change to hand off")
+    p_handoff.add_argument("change_id", nargs="?", help="Identifier of the change to hand off (inferred if omitted)")
     p_handoff.set_defaults(func=cmd_handoff)
 
     # verify
     p_verify = subparsers.add_parser("verify", help="Execute deterministic verification and compile receipt.md")
-    p_verify.add_argument("change_id", help="Identifier of the change to verify")
+    p_verify.add_argument("change_id", nargs="?", help="Identifier of the change to verify (inferred if omitted)")
     p_verify.set_defaults(func=cmd_verify)
+
+    # check
+    p_check = subparsers.add_parser("check", help="Pre-flight budget inspection of working tree changes")
+    p_check.add_argument("change_id", nargs="?", help="Identifier of the change to check (inferred if omitted)")
+    p_check.set_defaults(func=cmd_check)
 
     # status
     p_status = subparsers.add_parser("status", help="Show GoATee project or change status")
@@ -504,13 +655,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     # attest
     p_attest = subparsers.add_parser("attest", help="Record human attestation into review.md")
-    p_attest.add_argument("change_id", help="Identifier of the change to attest")
+    p_attest.add_argument("change_id", nargs="?", help="Identifier of the change to attest (inferred if omitted)")
+    p_attest.add_argument("-i", "--interactive", action="store_true", help="Launch interactive attestation wizard")
     p_attest.add_argument("--criterion", help="Criterion ID to attest (e.g. AC-11)")
-    p_attest.add_argument("--note", required=True, help="Mandatory review rationale note")
-    action_grp = p_attest.add_mutually_exclusive_group(required=True)
+    p_attest.add_argument("--note", help="Review rationale note (required in non-interactive mode)")
+    action_grp = p_attest.add_mutually_exclusive_group(required=False)
     action_grp.add_argument("--verified", action="store_true", help="Positively attest manual criterion")
     action_grp.add_argument("--rejected", action="store_true", help="Reject criterion or change")
     p_attest.set_defaults(func=cmd_attest)
+
+    # mcp
+    p_mcp = subparsers.add_parser("mcp", help="Run standard Model Context Protocol (MCP) server over stdio")
+    p_mcp.set_defaults(func=cmd_mcp)
 
     return parser
 

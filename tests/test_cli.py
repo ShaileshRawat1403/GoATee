@@ -884,6 +884,40 @@ class TestCLI(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    def test_active_change_resolution(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.name", "Test User"], check=True)
+                subprocess.run(["git", "config", "user.email", "test@test.local"], check=True)
+                (p / "README.md").write_text("# Test\n", encoding="utf-8")
+                subprocess.run(["git", "add", "README.md"], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser = build_parser()
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-auto"]).func(parser.parse_args(["new", "001-auto"]))
+
+                from goatee.core.status import resolve_active_change_id
+                # 1. Single unverified change in repo
+                resolved = resolve_active_change_id(p)
+                self.assertEqual(resolved, "001-auto")
+
+                # 2. Test branch name inference
+                subprocess.run(["git", "checkout", "-b", "change/001-auto"], check=True, capture_output=True)
+                resolved_branch = resolve_active_change_id(p)
+                self.assertEqual(resolved_branch, "001-auto")
+
+                # 3. Test .goatee/.active file pointer
+                (p / ".goatee" / ".active").write_text("001-auto\n", encoding="utf-8")
+                resolved_ptr = resolve_active_change_id(p)
+                self.assertEqual(resolved_ptr, "001-auto")
+            finally:
+                os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

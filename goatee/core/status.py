@@ -120,6 +120,58 @@ def find_project_root(cwd: Optional[Path] = None) -> Path:
     return root
 
 
+def resolve_active_change_id(repo_root: Optional[Path] = None) -> Optional[str]:
+    """Resolve active change ID from Git branch, pointer file, or active unverified change.
+
+    Returns None if it cannot be unambiguously determined.
+    """
+    try:
+        root = repo_root or find_project_root()
+    except ControlStateError:
+        return None
+
+    changes_dir = root / ".goatee" / "changes"
+    if not changes_dir.is_dir():
+        return None
+
+    # 1. Try Git branch name
+    res = subprocess.run(
+        ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=root
+    )
+    if res.returncode == 0:
+        branch = res.stdout.strip()
+        candidates = [branch]
+        for prefix in ("change/", "changes/", "feat/", "feature/"):
+            if branch.startswith(prefix):
+                candidates.append(branch[len(prefix):])
+        for cand in candidates:
+            if cand and (changes_dir / cand / "change.md").is_file():
+                return cand
+
+    # 2. Try .goatee/.active file
+    active_file = root / ".goatee" / ".active"
+    if active_file.is_file():
+        cand = active_file.read_text(encoding="utf-8").strip()
+        if cand and (changes_dir / cand / "change.md").is_file():
+            return cand
+
+    # 3. Check unverified changes in .goatee/changes/
+    unverified = []
+    for d in changes_dir.iterdir():
+        if d.is_dir() and (d / "change.md").is_file() and not (d / "receipt.md").is_file():
+            unverified.append(d.name)
+    if len(unverified) == 1:
+        return unverified[0]
+    elif len(unverified) > 1:
+        unverified.sort()
+        return unverified[-1]
+
+    return None
+
+
 def parse_project_name(project_md_path: Path) -> str:
     """Extract Project-Name from .goatee/project.md, failing closed if missing or empty."""
     if not project_md_path.is_file():

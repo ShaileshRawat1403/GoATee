@@ -104,6 +104,64 @@ def get_git_changed_files(baseline: str, target: str = "HEAD", cwd: Optional[Pat
     return changes
 
 
+def get_working_tree_changed_files(baseline: str, cwd: Optional[Path] = None) -> List[GitChange]:
+    """Retrieve exact list of GitChange objects between baseline and the current working tree.
+    
+    Includes committed changes, staged and unstaged modifications, and untracked files.
+    """
+    res = subprocess.run(
+        ["git", "diff", "--name-status", "--find-renames", baseline],
+        capture_output=True,
+        text=True,
+        cwd=cwd
+    )
+    if res.returncode != 0:
+        raise GitInspectionError(f"Failed to execute git diff: {res.stderr.strip()}")
+
+    changes: List[GitChange] = []
+    seen_paths = set()
+
+    for line in res.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split("\t")
+        if not parts:
+            continue
+        status_raw = parts[0].strip()
+        if status_raw.startswith("R"):
+            old_p = parts[1].strip() if len(parts) > 1 else ""
+            new_p = parts[2].strip() if len(parts) > 2 else ""
+            changes.append(GitChange(status="R", path=new_p, old_path=old_p))
+            seen_paths.add(new_p)
+            seen_paths.add(old_p)
+        elif len(parts) >= 2:
+            status = status_raw[0] if status_raw else "M"
+            path = parts[1].strip()
+            changes.append(GitChange(status=status, path=path))
+            seen_paths.add(path)
+
+    # Disclose untracked files from git status
+    status_res = subprocess.run(
+        ["git", "status", "--porcelain=v1", "-uall"],
+        capture_output=True,
+        text=True,
+        cwd=cwd
+    )
+    if status_res.returncode != 0:
+        raise GitInspectionError(f"Failed to execute git status: {status_res.stderr.strip()}")
+
+    for line in status_res.stdout.splitlines():
+        if not line.startswith("??"):
+            continue
+        raw_path = line[3:].strip()
+        if raw_path and raw_path not in seen_paths:
+            changes.append(GitChange(status="A", path=raw_path))
+            seen_paths.add(raw_path)
+
+    return changes
+
+
 def compare_budget(
     changed_files: List[Any],
     budget: BuildBudget
