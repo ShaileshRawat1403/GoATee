@@ -1,0 +1,44 @@
+name: GoATee Verification & CI Governance
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  verify:
+    name: Verify Specification & Delivery
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Execute GoATee CI Governance
+        run: |
+          python3 -m goatee.cli ci --allow-needs-review
+
+      - name: Generate HTML Delivery Certificate
+        if: always()
+        run: |
+          python3 -m goatee.cli cert || true
+
+      - name: Upload HTML Delivery Certificate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: goatee-delivery-certificates
+          path: .goatee/certificates/*.html
+          if-no-files-found: ignore

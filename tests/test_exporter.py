@@ -3,7 +3,12 @@
 import tempfile
 import unittest
 from pathlib import Path
-from goatee.core.exporter import generate_html_certificate, export_certificate
+from goatee.core.exporter import (
+    generate_html_certificate,
+    export_certificate,
+    generate_pr_comment_markdown,
+    export_pr_comment,
+)
 from goatee.core.models import AcceptanceCriterion, BuildBudget, ChangeContract, ContractState
 from goatee.core.status import ChangeDetailReport, ReceiptRow, AttestationRow
 
@@ -146,6 +151,49 @@ Baseline-Commit: {head_sha}
             custom_path = export_certificate(root, "001-feat", output_path=custom)
             self.assertTrue(custom_path.is_file())
             self.assertEqual(custom_path, custom)
+
+            # PR comment export
+            pr_path = export_pr_comment(root, "001-feat")
+            self.assertTrue(pr_path.is_file())
+            self.assertEqual(pr_path.name, "001-feat-pr-comment.md")
+            pr_content = pr_path.read_text(encoding="utf-8")
+            self.assertIn("### 🛡️ GoATee Delivery &amp; Governance: `001-feat`", pr_content)
+            self.assertIn("Requirement Coverage Matrix", pr_content)
+
+    def test_generate_pr_comment_markdown(self):
+        report = ChangeDetailReport(
+            change_id="002-pr",
+            intent="Deliver feature for PR verification.",
+            agreement_status="APPROVED",
+            budget_status="APPROVED",
+            baseline_commit="1111111",
+            working_tree="CLEAN",
+            is_verified=True,
+            verified_commit="2222222",
+            machine_verdict="NEEDS_REVIEW",
+            human_review="PENDING",
+            criteria_statuses=[
+                ReceiptRow(
+                    criterion_id="AC-01",
+                    criterion_type="manual",
+                    declared="Check UI manually",
+                    observed="(pending)",
+                    status="NEEDS_REVIEW"
+                )
+            ],
+            expected_changes=["main.py"],
+            surface_deviations=[],
+            protected_changes=[]
+        )
+
+        md = generate_pr_comment_markdown(report)
+        self.assertIn("### 🛡️ GoATee Delivery &amp; Governance: `002-pr`", md)
+        self.assertIn("🟡 **NEEDS REVIEW**", md)
+        self.assertIn("🟡 **PENDING**", md)
+        self.assertIn("Deliver feature for PR verification.", md)
+        self.assertIn("AC-01", md)
+        self.assertIn("`main.py`", md)
+        self.assertIn("- **Surface Deviations**: *(none)*", md)
 
 
 if __name__ == "__main__":

@@ -28,3 +28,7 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# GoATee local pointers & generated certificates
+.goatee/.active
+.goatee/certificates/

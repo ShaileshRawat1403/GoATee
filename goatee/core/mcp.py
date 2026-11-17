@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, TextIO
 
 from goatee.core.budget import compare_budget, get_working_tree_changed_files, GitInspectionError
+from goatee.core.linter import lint_change_contract, format_lint_report
 from goatee.core.parser import parse_change_contract, ContractSyntaxError
 from goatee.core.status import (
     find_project_root,
@@ -95,6 +96,19 @@ TOOLS_DEFINITIONS: List[Dict[str, Any]] = [
                 }
             },
             "required": ["expected_surface"]
+        }
+    },
+    {
+        "name": "goatee_lint_contract",
+        "description": "Inspect and lint a change contract (or active change) for semantic conflicts, missing sections, and path safety violations. Zero side effects.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "change_id": {
+                    "type": "string",
+                    "description": "Identifier of the change. If omitted, automatically resolves active change."
+                }
+            }
         }
     }
 ]
@@ -340,6 +354,34 @@ def handle_propose_budget(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     }
 
 
+def handle_lint_contract(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
+    change_id = args.get("change_id") or resolve_active_change_id(root)
+    if not change_id:
+        return {
+            "content": [{"type": "text", "text": "Error: No change-id provided and active change could not be uniquely inferred."}],
+            "isError": True
+        }
+
+    contract_path = root / ".goatee" / "changes" / change_id / "change.md"
+    if not contract_path.is_file():
+        contract_path = root / ".goatee" / "archive" / change_id / "change.md"
+
+    if not contract_path.is_file():
+        return {
+            "content": [{"type": "text", "text": f"Error: Change contract not found for '{change_id}' at {contract_path}."}],
+            "isError": True
+        }
+
+    issues = lint_change_contract(contract_path)
+    report = format_lint_report(change_id, issues)
+    has_errors = any(i.severity == "ERROR" for i in issues)
+
+    return {
+        "content": [{"type": "text", "text": report}],
+        "isError": has_errors
+    }
+
+
 def process_mcp_message(message: Dict[str, Any], root: Path) -> Optional[Dict[str, Any]]:
     """Process a single JSON-RPC 2.0 message according to MCP specification."""
     req_id = message.get("id")
@@ -398,6 +440,8 @@ def process_mcp_message(message: Dict[str, Any], root: Path) -> Optional[Dict[st
             result = handle_get_status(arguments, root)
         elif tool_name == "goatee_propose_budget":
             result = handle_propose_budget(arguments, root)
+        elif tool_name == "goatee_lint_contract":
+            result = handle_lint_contract(arguments, root)
         else:
             return {
                 "jsonrpc": "2.0",

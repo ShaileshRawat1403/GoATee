@@ -109,6 +109,7 @@ Baseline-Commit: {self.baseline_sha}
         self.assertIn("goatee_check_budget", tool_names)
         self.assertIn("goatee_get_status", tool_names)
         self.assertIn("goatee_propose_budget", tool_names)
+        self.assertIn("goatee_lint_contract", tool_names)
 
     def test_call_get_contract(self):
         req = {
@@ -249,6 +250,42 @@ Baseline-Commit:
         self.assertIsNotNone(resp)
         self.assertTrue(resp["result"]["isError"])
         self.assertIn("already has an APPROVED budget", resp["result"]["content"][0]["text"])
+
+    def test_call_lint_contract_clean(self):
+        req = {
+            "jsonrpc": "2.0",
+            "id": 22,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_lint_contract",
+                "arguments": {"change_id": "001-mcp"}
+            }
+        }
+        resp = process_mcp_message(req, self.repo_root)
+        self.assertIsNotNone(resp)
+        self.assertFalse(resp["result"]["isError"])
+        self.assertIn("001-mcp", resp["result"]["content"][0]["text"])
+        self.assertIn("Status: PASSED", resp["result"]["content"][0]["text"])
+
+    def test_call_lint_contract_with_errors(self):
+        bad_dir = self.repo_root / ".goatee" / "changes" / "003-bad"
+        bad_dir.mkdir(parents=True)
+        (bad_dir / "change.md").write_text("# Change: 003-bad\nMissing sections\n", encoding="utf-8")
+
+        req = {
+            "jsonrpc": "2.0",
+            "id": 23,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_lint_contract",
+                "arguments": {"change_id": "003-bad"}
+            }
+        }
+        resp = process_mcp_message(req, self.repo_root)
+        self.assertIsNotNone(resp)
+        self.assertTrue(resp["result"]["isError"])
+        self.assertIn("Status: FAILED", resp["result"]["content"][0]["text"])
+        self.assertIn("Missing '## Intent' section", resp["result"]["content"][0]["text"])
 
 
 if __name__ == "__main__":

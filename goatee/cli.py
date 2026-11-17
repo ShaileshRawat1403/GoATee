@@ -411,6 +411,45 @@ def cmd_verify(args: argparse.Namespace) -> int:
     print(f"Verdict: {result.verdict}")
     print(f"Delivery receipt compiled at {receipt_file}")
 
+    if getattr(args, "json", False):
+        import json
+        payload = {
+            "change_id": change_id,
+            "verdict": result.verdict,
+            "verified_at": result.verified_at,
+            "baseline_commit": result.baseline_commit,
+            "verified_commit": result.verified_commit,
+            "matrix": [
+                {
+                    "criterion_id": m.criterion_id,
+                    "criterion_type": m.evidence_type,
+                    "declared": m.declared,
+                    "observed": m.observed,
+                    "status": m.status,
+                }
+                for m in result.criterion_results
+            ],
+            "expected_changes": result.budget_result.expected_changes,
+            "surface_deviations": result.budget_result.surface_deviations,
+            "protected_changes": result.budget_result.protected_changes,
+            "mutations": result.mutations,
+        }
+        print(json.dumps(payload, indent=2))
+
+    if getattr(args, "ci", False):
+        from goatee.core.ci import write_github_step_summary
+        from goatee.core.exporter import generate_pr_comment_markdown
+        from goatee.core.status import get_change_report, get_working_tree_state, resolve_current_head, parse_project_name
+        working_tree = get_working_tree_state(cwd)
+        current_head = resolve_current_head(cwd)
+        report = get_change_report(cwd, change_id, working_tree, current_head)
+        pname = parse_project_name(cwd / ".goatee" / "project.md")
+        step_summary = generate_pr_comment_markdown(report, contract, pname)
+        write_github_step_summary(step_summary)
+
+    if getattr(args, "allow_needs_review", False) and result.verdict == "NEEDS_REVIEW":
+        return 0
+
     return 0 if result.verdict == "PASS" else 1
 
 
@@ -888,12 +927,19 @@ def cmd_rules(args: argparse.Namespace) -> int:
 def cmd_export(args: argparse.Namespace) -> int:
     """Export change delivery artifacts, certificates, and compliance reports."""
     from goatee.core.status import find_project_root, ControlStateError
-    from goatee.core.exporter import export_certificate
+    from goatee.core.exporter import export_certificate, export_pr_comment
 
     try:
         change_id = resolve_or_fail_change_id(args.change_id)
         root = find_project_root()
         out_p = Path(args.output) if getattr(args, "output", None) else None
+
+        if getattr(args, "pr_comment", False) or getattr(args, "markdown", False):
+            target = export_pr_comment(root, change_id, output_path=out_p)
+            print(f"Exported PR comment markdown summary for '{change_id}':")
+            print(f"  Path: {target}")
+            return 0
+
         target = export_certificate(root, change_id, output_path=out_p)
         print(f"Exported HTML delivery certificate for '{change_id}':")
         print(f"  Path: {target}")
@@ -901,6 +947,44 @@ def cmd_export(args: argparse.Namespace) -> int:
     except (ValueError, ControlStateError) as e:
         print(f"Error: {e}", file=sys.stderr)
         return 1
+
+
+def cmd_ci(args: argparse.Namespace) -> int:
+    """Run GoATee continuous integration pipeline with automated verification, linting, and step summary."""
+    import json
+    from goatee.core.status import find_project_root, ControlStateError
+    from goatee.core.ci import run_ci, ci_result_to_dict, format_github_step_summary
+
+    try:
+        root = find_project_root()
+    except ControlStateError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        return 1
+
+    change_id = getattr(args, "change_id", None)
+    allow_needs_review = getattr(args, "allow_needs_review", False)
+    all_changes = getattr(args, "all", False)
+    json_mode = getattr(args, "json", False)
+
+    res = run_ci(
+        root=root,
+        change_id=change_id,
+        allow_needs_review=allow_needs_review,
+        all_changes=all_changes,
+        write_step_summary=True,
+    )
+
+    if json_mode:
+        print(json.dumps(ci_result_to_dict(res), indent=2))
+    else:
+        print(format_github_step_summary(res))
+
+    if getattr(args, "output_summary", None):
+        out_p = Path(args.output_summary)
+        out_p.parent.mkdir(parents=True, exist_ok=True)
+        out_p.write_text(format_github_step_summary(res), encoding="utf-8")
+
+    return res.exit_code
 
 
 class GoateeArgumentParser(argparse.ArgumentParser):
@@ -950,7 +1034,19 @@ def build_parser() -> argparse.ArgumentParser:
     # verify
     p_verify = subparsers.add_parser("verify", help="Execute deterministic verification and compile receipt.md")
     p_verify.add_argument("change_id", nargs="?", help="Identifier of the change to verify (inferred if omitted)")
+    p_verify.add_argument("--ci", action="store_true", help="CI integration mode: writes summary to GITHUB_STEP_SUMMARY if present")
+    p_verify.add_argument("--allow-needs-review", action="store_true", help="Permit exit 0 when automated tests pass but manual review is pending")
+    p_verify.add_argument("--json", action="store_true", help="Output verification receipt as JSON to stdout")
     p_verify.set_defaults(func=cmd_verify)
+
+    # ci
+    p_ci = subparsers.add_parser("ci", help="Execute complete CI governance pipeline (linting, verification, and summary)")
+    p_ci.add_argument("change_id", nargs="?", help="Identifier of the change to verify (inferred if omitted)")
+    p_ci.add_argument("--all", action="store_true", help="Verify all unarchived approved changes")
+    p_ci.add_argument("--allow-needs-review", action="store_true", help="Exit code 0 if automated checks pass and manual review is pending")
+    p_ci.add_argument("--json", action="store_true", help="Output CI results as JSON")
+    p_ci.add_argument("--output-summary", help="Path to write the markdown summary file")
+    p_ci.set_defaults(func=cmd_ci)
 
     # check
     p_check = subparsers.add_parser("check", help="Pre-flight budget inspection of working tree changes")
@@ -1022,6 +1118,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_export = subparsers.add_parser("export", help="Export presentation-ready delivery certificates and artifacts")
     p_export.add_argument("change_id", nargs="?", help="Identifier of the change to export (inferred if omitted)")
     p_export.add_argument("--html", action="store_true", default=True, help="Export as self-contained HTML certificate (default)")
+    p_export.add_argument("--pr-comment", "--markdown", dest="pr_comment", action="store_true", help="Export summary as GitHub/GitLab PR comment markdown")
     p_export.add_argument("-o", "--output", help="Custom output file path")
     p_export.set_defaults(func=cmd_export)
 

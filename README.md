@@ -627,6 +627,9 @@ goatee export 001-export-csv
 
 # Or use the cert shortcut
 goatee cert 001-export-csv -o reports/delivery-cert.html
+
+# Export GitHub/GitLab PR comment markdown summary
+goatee export 001-export-csv --pr-comment
 ```
 
 The exported certificate is completely self-contained (HTML5 with embedded CSS, zero external CDN links or network calls, print/PDF optimized). It includes:
@@ -634,6 +637,75 @@ The exported certificate is completely self-contained (HTML5 with embedded CSS, 
 - Cryptographic commit provenance (`Baseline-Commit`, `Verified-Commit`, `Receipt-SHA256`, `Contract-SHA256`).
 - Full Requirement Coverage Matrix with execution times and signed human reviewer attribution.
 - Build Budget & Surface Analysis showing zero unapproved surface deviations and zero blast-radius breaches.
+
+The PR comment export (`--pr-comment` or `--markdown`) produces clean, GitHub-flavored Markdown tables and badges ready to be posted as pull request comments or release summaries.
+
+---
+
+## Continuous integration (CI/CD) & team governance
+
+GoATee provides native CI/CD integration for automated pipeline validation in GitHub Actions, GitLab CI, or custom runners:
+
+```bash
+# Execute complete GoATee CI pipeline
+goatee ci
+
+# In PR checks: allow exit 0 if automated checks pass while manual review is pending
+goatee ci --allow-needs-review
+
+# Verify all unarchived approved changes
+goatee ci --all
+
+# Output structured JSON report for automation tools
+goatee ci --json
+```
+
+### GitHub Actions Integration
+When running in GitHub Actions, `goatee ci` automatically detects the `$GITHUB_STEP_SUMMARY` environment variable and writes a rich job summary with status badges, requirement coverage matrices, and budget diffs.
+
+Reference GitHub Actions workflow (`.github/workflows/goatee-verify.yml`):
+
+```yaml
+name: GoATee Verification & CI Governance
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  verify:
+    name: Verify Specification & Delivery
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Execute GoATee CI Governance
+        run: |
+          python3 -m goatee.cli ci --allow-needs-review
+
+      - name: Generate HTML Delivery Certificate
+        if: always()
+        run: |
+          python3 -m goatee.cli cert || true
+
+      - name: Upload HTML Delivery Certificate
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: goatee-delivery-certificates
+          path: .goatee/certificates/*.html
+          if-no-files-found: ignore
+```
 
 ---
 
@@ -661,6 +733,7 @@ goatee mcp
 Exposed MCP tools:
 - `goatee_get_contract`: Fetch governing change contract, intent, acceptance criteria, and build budget.
 - `goatee_propose_budget`: Allow coding agents to draft/update the Build Budget section before human approval.
+- `goatee_lint_contract`: Validate contract syntax, section completeness, and path safety boundaries before approval.
 - `goatee_check_budget`: Pre-flight check on current working tree changes.
 - `goatee_get_status`: Project overview or detailed change report.
 
