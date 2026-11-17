@@ -798,10 +798,12 @@ class GoateeArgumentParser(argparse.ArgumentParser):
 
 
 def build_parser() -> argparse.ArgumentParser:
+    from goatee import __version__
     parser = GoateeArgumentParser(
         prog="goatee",
         description="GoATee: Spec and delivery control layer for AI-assisted software changes."
     )
+    parser.add_argument("-v", "--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     # init

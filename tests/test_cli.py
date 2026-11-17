@@ -918,6 +918,14 @@ class TestCLI(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    def test_version_flag(self):
+        parser = build_parser()
+        with io.StringIO() as buf, patch("sys.stdout", buf):
+            with self.assertRaises(SystemExit) as cm:
+                parser.parse_args(["--version"])
+            self.assertEqual(cm.exception.code, 0)
+            self.assertIn("0.3.0", buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

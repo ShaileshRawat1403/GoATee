@@ -4,14 +4,14 @@ archetype: project-readme
 status: active-development
 owner: Shailesh Rawat
 maintainer: Shailesh Rawat
-version: 0.2.0
+version: 0.3.0
 tags:
   - spec-driven-development
   - ai-assisted-development
   - forward-deployed
   - governance
   - evidence
-last_reviewed: 2026-09-21
+last_reviewed: 2026-11-17
 ---
 
 # GoATee
@@ -270,20 +270,26 @@ GoATee is under active development.
 * **004 — Proof Hardening**: Control-plane integrity safeguards, Git HEAD invariant enforcement, mutation halting, execution timeouts, DEVNULL stdin isolation, and rename-aware budget diffs.
 * **005 — Control Status**: Read-only control status (`goatee status`, `goatee status <change-id>`), separate contract/machine states, candidate vs. verified commit distinction, and working-tree cleanliness visibility without side effects.
 * **006 — Human Attestation**: Deterministic human attestation engine (`goatee attest`), receipt-bound review records (`review.md`), dual-verdict verification (`Machine Verdict` and `Human Review`), and Git-configured reviewer attribution without modifying historical machine receipts.
+* **007 — Release Prep**: Release alignment and packaging.
+
+### v0.3 Agent Bridge, Guardrails & Contract Integrity ✓
+
+* **008 — Pre-flight & Agent Bridge**: Working tree pre-flight budget inspection (`goatee check`), interactive human attestation terminal wizard (`goatee attest -i`), active change auto-detection, and pure stdlib stdio MCP server (`goatee mcp`).
+* **009 — Contract Integrity & Guardrails**: Cryptographic contract tamper detection (`Contract-SHA256`) eliminating the self-approving agent loophole, auditable human budget amendment protocol (`goatee amend`), zero-dependency Git pre-commit guardrail hook (`goatee hook install/uninstall`), and agent budget proposal via MCP (`goatee_propose_budget`).
 
 Current test result:
 
 ```text
-56 tests
-56 passed
+79 tests
+79 passed
 0 errors
 ```
 
 ### Release Statement
 
 ```text
-GoATee v0.2 is released.
-The control layer provides end-to-end agreement, bounded implementation, hardened machine proof, and receipt-bound human attestation.
+GoATee v0.3 is released.
+The control layer provides end-to-end agreement, bounded implementation, hardened machine proof, receipt-bound human attestation, cryptographic contract tamper protection, Git pre-commit guardrails, and seamless AI agent integration via stdio MCP.
 ```
 
 ---
