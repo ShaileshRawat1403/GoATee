@@ -266,6 +266,110 @@ Contract-SHA256:
         self.assertEqual(res.returncode, 0, msg=res.stderr)
         self.assertIn('"verdict": "PASS"', res.stdout)
 
+    def test_github_actions_pr_event_path_success(self):
+        """Workflow Path 1a: pull_request event resolves change via GITHUB_HEAD_REF and succeeds with --allow-needs-review."""
+        criteria = """- AC-01: Auto pass
+  Evidence:
+    type: automated
+    command: python3 -c "exit(0)"
+    expected: exit 0
+- AC-02: Manual review
+  Evidence:
+    type: manual
+    instruction: Check visually."""
+
+        self._create_change("009-pr-flow", criteria, ["pr_app.py"])
+        (self.repo_root / "pr_app.py").write_text("# pr\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo_root, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: pr code"], cwd=self.repo_root, check=True, capture_output=True)
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+        env["GITHUB_HEAD_REF"] = "feat/009-pr-flow"
+
+        res = subprocess.run(
+            ["python3", "-m", "goatee.cli", "ci", "--allow-needs-review"],
+            cwd=self.repo_root,
+            env=env,
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0, msg=res.stderr)
+        self.assertIn("009-pr-flow", res.stdout)
+        self.assertIn("NEEDS REVIEW (ALLOWED)", res.stdout)
+
+    def test_github_actions_pr_event_path_unresolved_fails_closed(self):
+        """Workflow Path 1b: pull_request with unknown branch fails closed without guessing."""
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+        env["GITHUB_HEAD_REF"] = "feat/unknown-nonexistent-branch"
+
+        res = subprocess.run(
+            ["python3", "-m", "goatee.cli", "ci", "--allow-needs-review"],
+            cwd=self.repo_root,
+            env=env,
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("No active change contract could be unambiguously resolved", res.stdout)
+
+    def test_github_actions_pr_event_path_machine_fail_exits_one(self):
+        """Workflow Path 1c: pull_request with failing automated checks exits 1 even with --allow-needs-review."""
+        criteria = """- AC-01: Auto fail
+  Evidence:
+    type: automated
+    command: python3 -c "import sys; sys.exit(1)"
+    expected: exit 0"""
+
+        self._create_change("010-pr-fail", criteria, ["fail_app.py"])
+        (self.repo_root / "fail_app.py").write_text("# fail\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=self.repo_root, check=True)
+        subprocess.run(["git", "commit", "-m", "feat: failing pr code"], cwd=self.repo_root, check=True, capture_output=True)
+
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+        env["GITHUB_HEAD_REF"] = "feat/010-pr-fail"
+
+        res = subprocess.run(
+            ["python3", "-m", "goatee.cli", "ci", "--allow-needs-review"],
+            cwd=self.repo_root,
+            env=env,
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 1)
+        self.assertIn("FAILED", res.stdout)
+
+    def test_github_actions_trunk_push_event_path(self):
+        """Workflow Path 2: On trunk (push to main), status check verifies project health."""
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).parent.parent)
+        if "GITHUB_HEAD_REF" in env:
+            del env["GITHUB_HEAD_REF"]
+
+        # 1. Healthy project status succeeds
+        res = subprocess.run(
+            ["python3", "-m", "goatee.cli", "status"],
+            cwd=self.repo_root,
+            env=env,
+            capture_output=True,
+            text=True
+        )
+        self.assertEqual(res.returncode, 0, msg=res.stderr)
+        self.assertIn("Project: CITestProject", res.stdout)
+
+        # 2. Corrupted project status fails closed
+        (self.repo_root / ".goatee" / "project.md").write_text("Invalid Corrupted Syntax Without Colon", encoding="utf-8")
+        res_fail = subprocess.run(
+            ["python3", "-m", "goatee.cli", "status"],
+            cwd=self.repo_root,
+            env=env,
+            capture_output=True,
+            text=True
+        )
+        self.assertNotEqual(res_fail.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

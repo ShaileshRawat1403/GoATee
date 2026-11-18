@@ -84,8 +84,9 @@ Harden GoATee's verification verdicts, CI governance, active change resolution, 
 - tests/test_verifier.py
 - tests/test_lifecycle.py
 - tests/test_status.py
-
 - tests/test_cli.py
+- .github/workflows/goatee-verify.yml
+
 ### Reuse Strategy
 - Reuse `parse_metadata_block` and `compute_contract_hash` from `goatee.core.parser`.
 - Reuse `verify_receipt_prerequisites` and receipt hash validation from `goatee.core.attest`.
@@ -94,7 +95,6 @@ Harden GoATee's verification verdicts, CI governance, active change resolution, 
 Dependency-Policy: No new runtime dependencies
 
 ### Blast Radius
-- .github/workflows/
 - goatee/templates/
 - goatee/core/rules.py
 - goatee/core/linter.py
@@ -102,10 +102,11 @@ Dependency-Policy: No new runtime dependencies
 
 ## Amendments
 - [2026-11-18 06:49:36Z] Added surface 'tests/test_cli.py' (Attributed to Shailesh Rawat <shailesh.rawat1403@gmail.com>; Reason: Updated test_git_inspection_fails_closed to assert FAIL on simulated git corruption)
+- [2026-11-18 12:28:00Z] Added surface '.github/workflows/goatee-verify.yml' and resolved Blast Radius directory protection to permit dual PR/trunk workflow compatibility while keeping unrelated workflows protected by Expected Surface boundaries (Attributed to Shailesh Rawat <shailesh.rawat1403@gmail.com>; Reason: Option A - Update GitHub Actions workflow to support deterministic CI on PRs and trunk regression testing on main)
 
 ## Contract State
 
 Agreement-Status: APPROVED
 Budget-Status: APPROVED
 Baseline-Commit: f37054c2d85804c62a166732f7bc62c5a93b99b5
-Contract-SHA256: b0d12acb9a006c3f6dc62bafde08d72b8413caa008d7bbb26577cf4d1e6c1a0c
+Contract-SHA256: 306f4ac6ae55f265f6b6d19d8c0b3260afd2f325629faf61176e43655c8165d9

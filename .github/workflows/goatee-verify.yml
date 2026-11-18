@@ -26,9 +26,16 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Execute GoATee CI Governance
+      - name: Execute GoATee CI Governance (Pull Request)
+        if: github.event_name == 'pull_request'
         run: |
           python3 -m goatee.cli ci --allow-needs-review
+
+      - name: Verify Trunk Integrity & Project Health (Post-Merge Main)
+        if: github.event_name == 'push'
+        run: |
+          python3 -m unittest discover tests
+          python3 -m goatee.cli status
 
       - name: Generate HTML Delivery Certificate
         if: always()
