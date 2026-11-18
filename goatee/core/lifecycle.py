@@ -21,7 +21,10 @@ from goatee.core.status import (
     ControlStateError,
     ReceiptSyntaxError
 )
-from goatee.core.attest import parse_review_markdown
+from goatee.core.attest import (
+    load_and_validate_review,
+    validate_contract_receipt_consistency
+)
 
 
 class LifecycleError(Exception):
@@ -50,20 +53,38 @@ def land_change(root: Path, change_id: str) -> Path:
     if not change_dir.is_dir() or not contract_file.is_file():
         raise LifecycleError(f"Change '{change_id}' not found at {change_dir}")
 
-    # 1. Parse and validate contract integrity
+    # 1. Parse and validate contract state and approval
     try:
         contract = parse_change_contract(contract_file)
     except ContractSyntaxError as cse:
         raise LifecycleError(f"Change '{change_id}' contract syntax error: {cse}")
 
+    # Require approved contract state
+    if contract.contract_state.agreement_status != "APPROVED":
+        raise LifecycleError(
+            f"Change '{change_id}' cannot be landed: Agreement-Status is '{contract.contract_state.agreement_status}'. Must be 'APPROVED'."
+        )
+    if contract.contract_state.budget_status != "APPROVED":
+        raise LifecycleError(
+            f"Change '{change_id}' cannot be landed: Budget-Status is '{contract.contract_state.budget_status}'. Must be 'APPROVED'."
+        )
+    if not contract.contract_state.baseline_commit:
+        raise LifecycleError(
+            f"Change '{change_id}' cannot be landed: missing Baseline-Commit."
+        )
+
+    # Require present and valid contract hash
     locked_hash = read_contract_hash(contract_file)
-    if locked_hash:
-        current_hash = compute_contract_hash(contract_file)
-        if current_hash != locked_hash:
-            raise LifecycleError(
-                f"Change '{change_id}' cannot be landed: contract integrity violation. "
-                f"Approved hash {locked_hash[:8]} != current hash {current_hash[:8]}."
-            )
+    if not locked_hash:
+        raise LifecycleError(
+            f"Change '{change_id}' cannot be landed: contract has no locked Contract-SHA256."
+        )
+    current_hash = compute_contract_hash(contract_file)
+    if current_hash != locked_hash:
+        raise LifecycleError(
+            f"Change '{change_id}' cannot be landed: contract integrity violation. "
+            f"Approved hash {locked_hash[:8]} != current hash {current_hash[:8]}."
+        )
 
     # 2. Require and validate receipt.md
     if not receipt_file.is_file():
@@ -81,17 +102,29 @@ def land_change(root: Path, change_id: str) -> Path:
             f"Change '{change_id}' cannot be landed: delivery receipt recorded FAIL."
         )
 
-    if any(r.status in ("FAILED", "REJECTED") for r in receipt.rows):
-        raise LifecycleError(
-            f"Change '{change_id}' cannot be landed: delivery receipt contains failed criteria."
-        )
+    # Validate contract-receipt consistency
+    try:
+        validate_contract_receipt_consistency(change_dir, contract, receipt)
+    except ControlStateError as cse:
+        raise LifecycleError(f"Change '{change_id}' cannot be landed: {cse}")
+
+    # Check all automated criteria are VERIFIED and explicitly reject NOT_RUN / FAILED / REJECTED
+    for row in receipt.rows:
+        if row.status == "NOT_RUN":
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: criterion '{row.criterion_id}' was NOT_RUN."
+            )
+        if row.criterion_type == "automated" and row.status != "VERIFIED":
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: automated criterion '{row.criterion_id}' is '{row.status}'. Must be 'VERIFIED'."
+            )
 
     if receipt.surface_deviations or receipt.protected_changes or receipt.mutations:
         raise LifecycleError(
             f"Change '{change_id}' cannot be landed: delivery receipt contains unapproved budget deviations or Git mutations."
         )
 
-    # 3. Dual-verdict validation: check manual criteria and review.md
+    # 3. Dual-verdict validation: check manual criteria and review.md with event replay
     has_manual_criteria = any(ac.evidence_type == "manual" for ac in contract.acceptance_criteria)
     if has_manual_criteria or receipt.verdict == "NEEDS_REVIEW":
         if not review_file.is_file():
@@ -101,28 +134,13 @@ def land_change(root: Path, change_id: str) -> Path:
             )
 
         try:
-            review_record = parse_review_markdown(review_file)
-        except (ControlStateError, Exception) as e:
-            raise LifecycleError(f"Change '{change_id}' review syntax error: {e}")
+            review_record = load_and_validate_review(change_dir, contract, receipt, root)
+        except ControlStateError as cse:
+            raise LifecycleError(f"Change '{change_id}' review validation failed: {cse}")
 
-        if review_record.verdict != "ACCEPTED":
+        if not review_record or review_record.verdict != "ACCEPTED":
             raise LifecycleError(
-                f"Change '{change_id}' cannot be landed: Review-Verdict is '{review_record.verdict}'. Must be 'ACCEPTED'."
-            )
-
-        # Check receipt SHA256 binding
-        actual_receipt_hash = hashlib.sha256(receipt_file.read_bytes()).hexdigest()
-        if review_record.receipt_sha256 != actual_receipt_hash:
-            raise LifecycleError(
-                f"Change '{change_id}' cannot be landed: review Receipt-SHA256 does not match receipt.md "
-                "(stale or forged review)."
-            )
-
-        # Check verified commit binding
-        if review_record.verified_commit != receipt.verified_commit:
-            raise LifecycleError(
-                f"Change '{change_id}' cannot be landed: review Verified-Commit '{review_record.verified_commit[:8]}' "
-                f"does not match receipt commit '{receipt.verified_commit[:8]}' (stale review)."
+                f"Change '{change_id}' cannot be landed: Review-Verdict is '{review_record.verdict if review_record else 'UNKNOWN'}'. Must be 'ACCEPTED'."
             )
 
         # Check all manual criteria in contract are verified by human
@@ -137,40 +155,43 @@ def land_change(root: Path, change_id: str) -> Path:
                     )
 
     # 4. Invariant: Check that implementation was NOT modified post-verification
-    # Working tree must have no uncommitted application changes
+    # Fail closed on ANY Git inspection error
     res_status = subprocess.run(
         ["git", "status", "--porcelain=v1"],
         capture_output=True,
         text=True,
         cwd=root
     )
-    if res_status.returncode == 0:
-        uncommitted = [
-            l for l in res_status.stdout.splitlines()
-            if l.strip() and not is_control_artifact(l[3:].strip())
-        ]
-        if uncommitted:
-            raise LifecycleError(
-                f"Change '{change_id}' cannot be landed: uncommitted implementation modifications detected post-verification."
-            )
+    if res_status.returncode != 0:
+        raise LifecycleError(f"Git inspection error during landing (git status): {res_status.stderr.strip()}")
 
-    # Application files must not have changed between verified commit and current HEAD
+    uncommitted = [
+        l for l in res_status.stdout.splitlines()
+        if l.strip() and not is_control_artifact(l[3:].strip())
+    ]
+    if uncommitted:
+        raise LifecycleError(
+            f"Change '{change_id}' cannot be landed: uncommitted implementation modifications detected post-verification."
+        )
+
     res_diff = subprocess.run(
         ["git", "diff", "--name-only", receipt.verified_commit, "HEAD"],
         capture_output=True,
         text=True,
         cwd=root
     )
-    if res_diff.returncode == 0:
-        app_diffs = [
-            f.strip() for f in res_diff.stdout.splitlines()
-            if f.strip() and not is_control_artifact(f.strip())
-        ]
-        if app_diffs:
-            raise LifecycleError(
-                f"Change '{change_id}' cannot be landed: implementation was modified after verification at commit "
-                f"{receipt.verified_commit[:8]} (modified files: {', '.join(app_diffs[:3])})."
-            )
+    if res_diff.returncode != 0:
+        raise LifecycleError(f"Git inspection error during landing (git diff): {res_diff.stderr.strip()}")
+
+    app_diffs = [
+        f.strip() for f in res_diff.stdout.splitlines()
+        if f.strip() and not is_control_artifact(f.strip())
+    ]
+    if app_diffs:
+        raise LifecycleError(
+            f"Change '{change_id}' cannot be landed: implementation was modified after verification at commit "
+            f"{receipt.verified_commit[:8]} (modified files: {', '.join(app_diffs[:3])})."
+        )
 
     # 5. Update contract state with Lifecycle-Status and Landed-At
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")

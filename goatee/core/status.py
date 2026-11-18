@@ -137,6 +137,7 @@ def resolve_active_change_id(repo_root: Optional[Path] = None) -> Optional[str]:
         return None
 
     # 1. Try Git branch name
+    is_trunk = False
     res = subprocess.run(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         capture_output=True,
@@ -145,6 +146,8 @@ def resolve_active_change_id(repo_root: Optional[Path] = None) -> Optional[str]:
     )
     if res.returncode == 0:
         branch = res.stdout.strip()
+        if branch in ("main", "master", "trunk", "HEAD"):
+            is_trunk = True
         candidates = [branch]
         for prefix in ("change/", "changes/", "feat/", "feature/"):
             if branch.startswith(prefix):
@@ -173,8 +176,12 @@ def resolve_active_change_id(repo_root: Optional[Path] = None) -> Optional[str]:
             return cand
 
     # 4. Check unverified changes in .goatee/changes/
-    # Invariant: ONLY resolve if there is EXACTLY ONE unverified change.
-    # If multiple candidates exist or none exist, fail closed (return None) to prevent guessing.
+    # Invariant: NEVER guess an unverified change when on a trunk branch (main/master/trunk).
+    # On trunk, active change must be explicitly specified or discovered via GITHUB_HEAD_REF / .active.
+    # On non-trunk feature branches, ONLY resolve if there is EXACTLY ONE unverified change.
+    if is_trunk:
+        return None
+
     unverified = []
     for d in changes_dir.iterdir():
         if d.is_dir() and (d / "change.md").is_file() and not (d / "receipt.md").is_file():

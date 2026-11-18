@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from goatee.core.budget import GitInspectionError
+from goatee.core.budget import GitInspectionError, is_control_artifact
 from goatee.core.linter import lint_change_contract, LintIssue
 from goatee.core.models import ChangeContract
 from goatee.core.parser import (
@@ -21,7 +21,10 @@ from goatee.core.status import (
     find_project_root,
     resolve_active_change_id,
     ControlStateError,
+    parse_receipt,
+    ReceiptSyntaxError,
 )
+from goatee.core.attest import load_and_validate_review
 from goatee.core.verifier import verify_change, render_receipt_markdown, VerificationResult
 
 
@@ -71,35 +74,28 @@ def run_ci(
         active = resolve_active_change_id(project_root)
         if active:
             target_change_ids = [active]
-        elif changes_dir.is_dir():
-            candidates = sorted(
-                p.name for p in changes_dir.iterdir() if p.is_dir() and (p / "change.md").is_file()
+        else:
+            report = ChangeCIReport(
+                change_id="(unresolved)",
+                status="FAIL",
+                intent="",
+                baseline_commit=None,
+                verified_commit=None,
+                error_message=(
+                    "No active change contract could be unambiguously resolved from Git branch or workspace. "
+                    "Specify target change with 'goatee ci <change-id>' or pass '--all'."
+                ),
             )
-            if len(candidates) == 1:
-                target_change_ids = candidates
-            elif len(candidates) > 1:
-                # Ambiguous change selection: fail closed, do not guess
-                report = ChangeCIReport(
-                    change_id="(ambiguous)",
-                    status="FAIL",
-                    intent="",
-                    baseline_commit=None,
-                    verified_commit=None,
-                    error_message=(
-                        f"Ambiguous active change: {len(candidates)} changes found in .goatee/changes/. "
-                        "Specify target change with 'goatee ci <change-id>' or pass '--all-changes'."
-                    ),
-                )
-                res = CIRunResult(
-                    overall_status="FAIL",
-                    exit_code=1,
-                    allow_needs_review=allow_needs_review,
-                    reports=[report],
-                    project_root=project_root,
-                )
-                if write_step_summary:
-                    write_github_step_summary(format_github_step_summary(res))
-                return res
+            res = CIRunResult(
+                overall_status="FAIL",
+                exit_code=1,
+                allow_needs_review=allow_needs_review,
+                reports=[report],
+                project_root=project_root,
+            )
+            if write_step_summary:
+                write_github_step_summary(format_github_step_summary(res))
+            return res
 
     if not target_change_ids:
         report = ChangeCIReport(
@@ -281,65 +277,126 @@ def run_ci(
             has_fail = True
             continue
 
-        # Write delivery receipt only if explicitly requested
-        if write_receipt:
+        # Write delivery receipt only if explicitly requested and not already attested
+        receipt_file = changes_dir / cid / "receipt.md"
+        review_file = changes_dir / cid / "review.md"
+        if write_receipt and not review_file.is_file():
             receipt_content = render_receipt_markdown(verif_res, template_path)
-            receipt_file = changes_dir / cid / "receipt.md"
             receipt_file.write_text(receipt_content, encoding="utf-8")
 
         # 6. Read human review if present and validate its integrity against receipt
         human_verdict = None
-        review_file = changes_dir / cid / "review.md"
-        receipt_file = changes_dir / cid / "receipt.md"
 
         if review_file.is_file():
-            try:
-                from goatee.core.attest import parse_review_markdown
-                review_record = parse_review_markdown(review_file)
-                human_verdict = review_record.verdict
-
-                # Invariant: human review must not be stale (must bind to the exact verified commit)
-                if review_record.verified_commit != verif_res.verified_commit:
-                    reports.append(
-                        ChangeCIReport(
-                            change_id=cid,
-                            status="FAIL",
-                            intent=contract.intent,
-                            baseline_commit=contract.contract_state.baseline_commit,
-                            verified_commit=verif_res.verified_commit,
-                            lint_issues=lint_issues,
-                            verification_result=verif_res,
-                            human_verdict=human_verdict,
-                            error_message=(
-                                f"Stale human review: review.md binds to commit {review_record.verified_commit[:8]}, "
-                                f"but current verification verified commit {verif_res.verified_commit[:8]}."
-                            ),
-                        )
+            if not receipt_file.is_file():
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message="Review integrity violation: review.md exists but receipt.md is missing.",
                     )
-                    has_fail = True
-                    continue
+                )
+                has_fail = True
+                continue
 
-                # If receipt.md exists on disk, review must bind to its exact hash
-                if receipt_file.is_file():
-                    import hashlib
-                    actual_receipt_hash = hashlib.sha256(receipt_file.read_bytes()).hexdigest()
-                    if review_record.receipt_sha256 != actual_receipt_hash:
-                        reports.append(
-                            ChangeCIReport(
-                                change_id=cid,
-                                status="FAIL",
-                                intent=contract.intent,
-                                baseline_commit=contract.contract_state.baseline_commit,
-                                verified_commit=verif_res.verified_commit,
-                                lint_issues=lint_issues,
-                                verification_result=verif_res,
-                                human_verdict=human_verdict,
-                                error_message="Review integrity violation: review.md Receipt-SHA256 does not match receipt.md.",
-                            )
-                        )
-                        has_fail = True
-                        continue
+            try:
+                receipt = parse_receipt(receipt_file)
+            except ReceiptSyntaxError as rse:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=f"Delivery receipt syntax error: {rse}",
+                    )
+                )
+                has_fail = True
+                continue
 
+            # Check application drift between verified commit in receipt and current HEAD
+            res_diff = subprocess.run(
+                ["git", "diff", "--name-only", receipt.verified_commit, "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=project_root
+            )
+            if res_diff.returncode != 0:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=f"Git inspection error during CI drift check: {res_diff.stderr.strip()}",
+                    )
+                )
+                has_fail = True
+                continue
+
+            app_diffs = [
+                f.strip() for f in res_diff.stdout.splitlines()
+                if f.strip() and not is_control_artifact(f.strip())
+            ]
+            if app_diffs:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=(
+                            f"Implementation was modified after verification at commit {receipt.verified_commit[:8]} "
+                            f"(modified files: {', '.join(app_diffs[:3])})."
+                        ),
+                    )
+                )
+                has_fail = True
+                continue
+
+            # Replay and validate full review integrity using load_and_validate_review
+            try:
+                review_record = load_and_validate_review(
+                    changes_dir / cid, contract, receipt, project_root
+                )
+                if review_record:
+                    human_verdict = review_record.verdict
+                else:
+                    human_verdict = None
+            except ControlStateError as cse:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=f"Review integrity violation: {cse}",
+                    )
+                )
+                has_fail = True
+                continue
             except Exception as e:
                 reports.append(
                     ChangeCIReport(
@@ -350,8 +407,8 @@ def run_ci(
                         verified_commit=verif_res.verified_commit,
                         lint_issues=lint_issues,
                         verification_result=verif_res,
-                        human_verdict=human_verdict,
-                        error_message=f"Failed to parse human review: {e}",
+                        human_verdict=None,
+                        error_message=f"Failed to validate human review: {e}",
                     )
                 )
                 has_fail = True
@@ -361,7 +418,7 @@ def run_ci(
         change_status = verif_res.verdict
         if human_verdict == "REJECTED":
             change_status = "FAIL"
-        elif verif_res.verdict == "NEEDS_REVIEW" and human_verdict == "ACCEPTED":
+        elif verif_res.verdict in ("PASS", "NEEDS_REVIEW") and human_verdict == "ACCEPTED":
             # If all automated checks passed (NEEDS_REVIEW) and human verified all manual criteria, it counts as PASS
             change_status = "PASS"
         elif verif_res.verdict == "FAIL":
