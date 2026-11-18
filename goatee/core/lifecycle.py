@@ -1,18 +1,27 @@
 """Change lifecycle management: landing accepted changes and archiving retired changes."""
 
+import hashlib
 import shutil
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from goatee.core.budget import is_control_artifact
 from goatee.core.parser import (
     parse_change_contract,
     parse_metadata_block,
     update_contract_state,
     compute_contract_hash,
+    read_contract_hash,
     ContractSyntaxError
 )
-from goatee.core.status import ControlStateError, ReceiptSyntaxError
+from goatee.core.status import (
+    parse_receipt,
+    ControlStateError,
+    ReceiptSyntaxError
+)
+from goatee.core.attest import parse_review_markdown
 
 
 class LifecycleError(Exception):
@@ -22,6 +31,13 @@ class LifecycleError(Exception):
 
 def land_change(root: Path, change_id: str) -> Path:
     """Land an accepted change: verify acceptance preconditions, update lifecycle, and move to archive.
+    
+    Enforces that:
+    1. Contract exists, parses, and has not been tampered with since approval.
+    2. Delivery receipt exists, records no machine failures, no budget deviations, and no mutations.
+    3. If manual acceptance criteria exist (or receipt is NEEDS_REVIEW), valid, untampered human review
+       with Review-Verdict: ACCEPTED is required, binding to the exact receipt and verified commit.
+    4. Implementation has not been modified post-verification.
     
     Returns destination path in .goatee/archive/<change_id>.
     """
@@ -34,28 +50,129 @@ def land_change(root: Path, change_id: str) -> Path:
     if not change_dir.is_dir() or not contract_file.is_file():
         raise LifecycleError(f"Change '{change_id}' not found at {change_dir}")
 
-    # 1. Require receipt.md
+    # 1. Parse and validate contract integrity
+    try:
+        contract = parse_change_contract(contract_file)
+    except ContractSyntaxError as cse:
+        raise LifecycleError(f"Change '{change_id}' contract syntax error: {cse}")
+
+    locked_hash = read_contract_hash(contract_file)
+    if locked_hash:
+        current_hash = compute_contract_hash(contract_file)
+        if current_hash != locked_hash:
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: contract integrity violation. "
+                f"Approved hash {locked_hash[:8]} != current hash {current_hash[:8]}."
+            )
+
+    # 2. Require and validate receipt.md
     if not receipt_file.is_file():
         raise LifecycleError(
             f"Change '{change_id}' cannot be landed: delivery receipt missing. Run 'goatee verify {change_id}' first."
         )
 
-    # 2. Require review.md with ACCEPTED verdict
-    if not review_file.is_file():
+    try:
+        receipt = parse_receipt(receipt_file)
+    except ReceiptSyntaxError as rse:
+        raise LifecycleError(f"Change '{change_id}' receipt syntax error: {rse}")
+
+    if receipt.verdict == "FAIL":
         raise LifecycleError(
-            f"Change '{change_id}' cannot be landed: human review missing. Run 'goatee attest {change_id}' first."
+            f"Change '{change_id}' cannot be landed: delivery receipt recorded FAIL."
         )
 
-    review_text = review_file.read_text(encoding="utf-8")
-    review_meta = parse_metadata_block(review_text)
-    review_verdict = review_meta.get("Review-Verdict", "").strip()
-
-    if review_verdict != "ACCEPTED":
+    if any(r.status in ("FAILED", "REJECTED") for r in receipt.rows):
         raise LifecycleError(
-            f"Change '{change_id}' cannot be landed: Review-Verdict is '{review_verdict or 'UNKNOWN'}'. Must be 'ACCEPTED'."
+            f"Change '{change_id}' cannot be landed: delivery receipt contains failed criteria."
         )
 
-    # 3. Update contract state with Lifecycle-Status and Landed-At
+    if receipt.surface_deviations or receipt.protected_changes or receipt.mutations:
+        raise LifecycleError(
+            f"Change '{change_id}' cannot be landed: delivery receipt contains unapproved budget deviations or Git mutations."
+        )
+
+    # 3. Dual-verdict validation: check manual criteria and review.md
+    has_manual_criteria = any(ac.evidence_type == "manual" for ac in contract.acceptance_criteria)
+    if has_manual_criteria or receipt.verdict == "NEEDS_REVIEW":
+        if not review_file.is_file():
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: human review missing for manual acceptance criteria. "
+                f"Run 'goatee attest {change_id}' first."
+            )
+
+        try:
+            review_record = parse_review_markdown(review_file)
+        except (ControlStateError, Exception) as e:
+            raise LifecycleError(f"Change '{change_id}' review syntax error: {e}")
+
+        if review_record.verdict != "ACCEPTED":
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: Review-Verdict is '{review_record.verdict}'. Must be 'ACCEPTED'."
+            )
+
+        # Check receipt SHA256 binding
+        actual_receipt_hash = hashlib.sha256(receipt_file.read_bytes()).hexdigest()
+        if review_record.receipt_sha256 != actual_receipt_hash:
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: review Receipt-SHA256 does not match receipt.md "
+                "(stale or forged review)."
+            )
+
+        # Check verified commit binding
+        if review_record.verified_commit != receipt.verified_commit:
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: review Verified-Commit '{review_record.verified_commit[:8]}' "
+                f"does not match receipt commit '{receipt.verified_commit[:8]}' (stale review)."
+            )
+
+        # Check all manual criteria in contract are verified by human
+        attested_map = {row.criterion_id: row.human_attestation for row in review_record.rows}
+        for ac in contract.acceptance_criteria:
+            if ac.evidence_type == "manual":
+                h_stat = attested_map.get(ac.id)
+                if h_stat != "VERIFIED":
+                    raise LifecycleError(
+                        f"Change '{change_id}' cannot be landed: manual criterion '{ac.id}' is '{h_stat or 'UNATTESTED'}'. "
+                        "All manual criteria must be VERIFIED in review.md."
+                    )
+
+    # 4. Invariant: Check that implementation was NOT modified post-verification
+    # Working tree must have no uncommitted application changes
+    res_status = subprocess.run(
+        ["git", "status", "--porcelain=v1"],
+        capture_output=True,
+        text=True,
+        cwd=root
+    )
+    if res_status.returncode == 0:
+        uncommitted = [
+            l for l in res_status.stdout.splitlines()
+            if l.strip() and not is_control_artifact(l[3:].strip())
+        ]
+        if uncommitted:
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: uncommitted implementation modifications detected post-verification."
+            )
+
+    # Application files must not have changed between verified commit and current HEAD
+    res_diff = subprocess.run(
+        ["git", "diff", "--name-only", receipt.verified_commit, "HEAD"],
+        capture_output=True,
+        text=True,
+        cwd=root
+    )
+    if res_diff.returncode == 0:
+        app_diffs = [
+            f.strip() for f in res_diff.stdout.splitlines()
+            if f.strip() and not is_control_artifact(f.strip())
+        ]
+        if app_diffs:
+            raise LifecycleError(
+                f"Change '{change_id}' cannot be landed: implementation was modified after verification at commit "
+                f"{receipt.verified_commit[:8]} (modified files: {', '.join(app_diffs[:3])})."
+            )
+
+    # 5. Update contract state with Lifecycle-Status and Landed-At
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
     update_contract_state(contract_file, "Lifecycle-Status", "LANDED")
     update_contract_state(contract_file, "Landed-At", now_iso)
@@ -64,7 +181,7 @@ def land_change(root: Path, change_id: str) -> Path:
     new_hash = compute_contract_hash(contract_file)
     update_contract_state(contract_file, "Contract-SHA256", new_hash)
 
-    # 4. Relocate to .goatee/archive/<change_id>
+    # 6. Relocate to .goatee/archive/<change_id>
     archive_dir = root / ".goatee" / "archive"
     archive_dir.mkdir(parents=True, exist_ok=True)
     dest_dir = archive_dir / change_id
@@ -74,7 +191,7 @@ def land_change(root: Path, change_id: str) -> Path:
 
     shutil.move(str(change_dir), str(dest_dir))
 
-    # 5. Clean up .goatee/.active if pointing to this change
+    # 7. Clean up .goatee/.active if pointing to this change
     active_file = root / ".goatee" / ".active"
     if active_file.is_file():
         cur_active = active_file.read_text(encoding="utf-8").strip()

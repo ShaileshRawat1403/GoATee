@@ -72,15 +72,34 @@ def run_ci(
         if active:
             target_change_ids = [active]
         elif changes_dir.is_dir():
-            # If there's only 1 unarchived change, take it
             candidates = sorted(
                 p.name for p in changes_dir.iterdir() if p.is_dir() and (p / "change.md").is_file()
             )
             if len(candidates) == 1:
                 target_change_ids = candidates
             elif len(candidates) > 1:
-                # Default to all changes when none is individually singled out
-                target_change_ids = candidates
+                # Ambiguous change selection: fail closed, do not guess
+                report = ChangeCIReport(
+                    change_id="(ambiguous)",
+                    status="FAIL",
+                    intent="",
+                    baseline_commit=None,
+                    verified_commit=None,
+                    error_message=(
+                        f"Ambiguous active change: {len(candidates)} changes found in .goatee/changes/. "
+                        "Specify target change with 'goatee ci <change-id>' or pass '--all-changes'."
+                    ),
+                )
+                res = CIRunResult(
+                    overall_status="FAIL",
+                    exit_code=1,
+                    allow_needs_review=allow_needs_review,
+                    reports=[report],
+                    project_root=project_root,
+                )
+                if write_step_summary:
+                    write_github_step_summary(format_github_step_summary(res))
+                return res
 
     if not target_change_ids:
         report = ChangeCIReport(
@@ -268,21 +287,85 @@ def run_ci(
             receipt_file = changes_dir / cid / "receipt.md"
             receipt_file.write_text(receipt_content, encoding="utf-8")
 
-        # 6. Read human review if present
+        # 6. Read human review if present and validate its integrity against receipt
         human_verdict = None
         review_file = changes_dir / cid / "review.md"
-        if review_file.is_file():
-            for line in review_file.read_text(encoding="utf-8").splitlines():
-                if line.startswith("Review-Verdict:"):
-                    human_verdict = line.split(":", 1)[1].strip()
-                    break
+        receipt_file = changes_dir / cid / "receipt.md"
 
+        if review_file.is_file():
+            try:
+                from goatee.core.attest import parse_review_markdown
+                review_record = parse_review_markdown(review_file)
+                human_verdict = review_record.verdict
+
+                # Invariant: human review must not be stale (must bind to the exact verified commit)
+                if review_record.verified_commit != verif_res.verified_commit:
+                    reports.append(
+                        ChangeCIReport(
+                            change_id=cid,
+                            status="FAIL",
+                            intent=contract.intent,
+                            baseline_commit=contract.contract_state.baseline_commit,
+                            verified_commit=verif_res.verified_commit,
+                            lint_issues=lint_issues,
+                            verification_result=verif_res,
+                            human_verdict=human_verdict,
+                            error_message=(
+                                f"Stale human review: review.md binds to commit {review_record.verified_commit[:8]}, "
+                                f"but current verification verified commit {verif_res.verified_commit[:8]}."
+                            ),
+                        )
+                    )
+                    has_fail = True
+                    continue
+
+                # If receipt.md exists on disk, review must bind to its exact hash
+                if receipt_file.is_file():
+                    import hashlib
+                    actual_receipt_hash = hashlib.sha256(receipt_file.read_bytes()).hexdigest()
+                    if review_record.receipt_sha256 != actual_receipt_hash:
+                        reports.append(
+                            ChangeCIReport(
+                                change_id=cid,
+                                status="FAIL",
+                                intent=contract.intent,
+                                baseline_commit=contract.contract_state.baseline_commit,
+                                verified_commit=verif_res.verified_commit,
+                                lint_issues=lint_issues,
+                                verification_result=verif_res,
+                                human_verdict=human_verdict,
+                                error_message="Review integrity violation: review.md Receipt-SHA256 does not match receipt.md.",
+                            )
+                        )
+                        has_fail = True
+                        continue
+
+            except Exception as e:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=human_verdict,
+                        error_message=f"Failed to parse human review: {e}",
+                    )
+                )
+                has_fail = True
+                continue
+
+        # Invariant: Human acceptance must NEVER override failed machine evidence
         change_status = verif_res.verdict
         if human_verdict == "REJECTED":
             change_status = "FAIL"
         elif verif_res.verdict == "NEEDS_REVIEW" and human_verdict == "ACCEPTED":
-            # If human signed off on all manual criteria, it counts as PASS
+            # If all automated checks passed (NEEDS_REVIEW) and human verified all manual criteria, it counts as PASS
             change_status = "PASS"
+        elif verif_res.verdict == "FAIL":
+            change_status = "FAIL"
 
         if change_status == "FAIL":
             has_fail = True

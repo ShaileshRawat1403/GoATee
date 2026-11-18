@@ -552,11 +552,11 @@ class TestCLI(unittest.TestCase):
                 with patch("goatee.core.verifier.get_git_visible_fingerprint", side_effect=mocked_fp):
                     rc = parser.parse_args(["verify", "001-feat"]).func(parser.parse_args(["verify", "001-feat"]))
 
-                self.assertEqual(rc, 1)  # NEEDS_REVIEW exits 1
+                self.assertEqual(rc, 1)  # FAIL exits 1
                 receipt_file = p / ".goatee" / "changes" / "001-feat" / "receipt.md"
                 self.assertTrue(receipt_file.is_file())
                 receipt_text = receipt_file.read_text(encoding="utf-8")
-                self.assertIn("Verdict: NEEDS_REVIEW", receipt_text)
+                self.assertIn("Verdict: FAIL", receipt_text)
                 self.assertIn("GIT INSPECTION FAILED", receipt_text)
                 self.assertIn("AC-01", receipt_text)
                 self.assertIn("FAILED", receipt_text)

@@ -1,5 +1,6 @@
 """Zero-side-effect inspection service for GoATee project and change status."""
 
+import os
 import re
 import subprocess
 from dataclasses import dataclass, field
@@ -152,23 +153,34 @@ def resolve_active_change_id(repo_root: Optional[Path] = None) -> Optional[str]:
             if cand and (changes_dir / cand / "change.md").is_file():
                 return cand
 
-    # 2. Try .goatee/.active file
+    # 2. Try GITHUB_HEAD_REF environment discovery hint (e.g. PR branch in CI)
+    # Treated strictly as a discovery hint, not an authorization authority.
+    gh_ref = os.environ.get("GITHUB_HEAD_REF", "").strip()
+    if gh_ref:
+        gh_candidates = [gh_ref]
+        for prefix in ("change/", "changes/", "feat/", "feature/"):
+            if gh_ref.startswith(prefix):
+                gh_candidates.append(gh_ref[len(prefix):])
+        for cand in gh_candidates:
+            if cand and (changes_dir / cand / "change.md").is_file():
+                return cand
+
+    # 3. Try .goatee/.active file
     active_file = root / ".goatee" / ".active"
     if active_file.is_file():
         cand = active_file.read_text(encoding="utf-8").strip()
         if cand and (changes_dir / cand / "change.md").is_file():
             return cand
 
-    # 3. Check unverified changes in .goatee/changes/
+    # 4. Check unverified changes in .goatee/changes/
+    # Invariant: ONLY resolve if there is EXACTLY ONE unverified change.
+    # If multiple candidates exist or none exist, fail closed (return None) to prevent guessing.
     unverified = []
     for d in changes_dir.iterdir():
         if d.is_dir() and (d / "change.md").is_file() and not (d / "receipt.md").is_file():
             unverified.append(d.name)
     if len(unverified) == 1:
         return unverified[0]
-    elif len(unverified) > 1:
-        unverified.sort()
-        return unverified[-1]
 
     return None
 

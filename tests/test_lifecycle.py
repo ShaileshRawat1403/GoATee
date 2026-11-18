@@ -43,6 +43,39 @@ class TestLifecycle(unittest.TestCase):
         c_path.write_text(content, encoding="utf-8")
         return c_dir
 
+    def _write_valid_receipt(self, c_dir: Path, change_id: str, verdict: str = "NEEDS_REVIEW", head_sha: str = "1111111111111111"):
+        from goatee.core.verifier import VerificationResult, CriterionResult, render_receipt_markdown
+        from goatee.core.budget import BudgetComparisonResult
+
+        template_path = Path(__file__).parent.parent / "goatee" / "templates" / "receipt.md"
+        v_res = VerificationResult(
+            change_id=change_id,
+            baseline_commit=head_sha,
+            verified_commit=head_sha,
+            budget_result=BudgetComparisonResult(expected_changes=["app.py"]),
+            criterion_results=[
+                CriterionResult(
+                    criterion_id="AC-01",
+                    evidence_type="automated",
+                    declared="true (exit 0)",
+                    observed="exit 0",
+                    status="VERIFIED"
+                ),
+                CriterionResult(
+                    criterion_id="AC-02",
+                    evidence_type="manual",
+                    declared="visual check",
+                    observed="Pending",
+                    status="NEEDS_REVIEW"
+                )
+            ],
+            mutations=[],
+            verdict=verdict,
+            verified_at="2026-11-18 12:00:00Z"
+        )
+        receipt_text = render_receipt_markdown(v_res, template_path)
+        (c_dir / "receipt.md").write_text(receipt_text, encoding="utf-8")
+
     def test_land_requires_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -55,7 +88,8 @@ class TestLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             c_dir = self._setup_repo(root, "001-feat")
-            (c_dir / "receipt.md").write_text("# Delivery Receipt: 001-feat\nVerdict: PASS\n", encoding="utf-8")
+            res_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True)
+            self._write_valid_receipt(c_dir, "001-feat", verdict="NEEDS_REVIEW", head_sha=res_head.stdout.strip())
             with self.assertRaises(LifecycleError) as cm:
                 land_change(root, "001-feat")
             self.assertIn("human review missing", str(cm.exception))
@@ -64,8 +98,37 @@ class TestLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             c_dir = self._setup_repo(root, "001-feat")
-            (c_dir / "receipt.md").write_text("# Delivery Receipt: 001-feat\nVerdict: NEEDS_REVIEW\n", encoding="utf-8")
-            (c_dir / "review.md").write_text("# Human Review: 001-feat\nReview-Verdict: REJECTED\n", encoding="utf-8")
+            res_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True)
+            head_sha = res_head.stdout.strip()
+            self._write_valid_receipt(c_dir, "001-feat", verdict="NEEDS_REVIEW", head_sha=head_sha)
+
+            review_text = f"""# Human Review: 001-feat
+Change-ID: 001-feat
+Review-Verdict: REJECTED
+Updated-At: 2026-11-18 12:00:00Z
+
+## Receipt Binding
+Verified-Commit: {head_sha}
+Receipt-Commit: {head_sha}
+Receipt-SHA256: dummy_sha
+
+## Attestation Coverage Matrix
+| Criterion | Type | Machine Status | Human Attestation | Reviewer | Attested At | Note |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| **AC-02** | manual | NEEDS_REVIEW | **REJECTED** | Rev | 2026-11-18 12:00:00Z | Rejected |
+
+## Review Event History
+- Event: 1
+  Attested-At: 2026-11-18 12:00:00Z
+  Scope: criterion
+  Criterion: AC-02
+  Observation: REJECTED
+  Reviewer-Name: Rev
+  Reviewer-Email: rev@example.com
+  Attribution: Git config
+  Note: Rejected
+"""
+            (c_dir / "review.md").write_text(review_text, encoding="utf-8")
             with self.assertRaises(LifecycleError) as cm:
                 land_change(root, "001-feat")
             self.assertIn("Must be 'ACCEPTED'", str(cm.exception))

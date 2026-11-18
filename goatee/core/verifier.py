@@ -149,12 +149,13 @@ def validate_evidence_declaration(ac: AcceptanceCriterion) -> Optional[int]:
 def execute_criterion_command(
     command_str: str,
     cwd: Optional[Path] = None,
-    timeout_seconds: float = DEFAULT_VERIFICATION_TIMEOUT
+    timeout_seconds: Optional[float] = None
 ) -> Tuple[Optional[int], float, str, str, bool]:
     """Execute command directly using shlex.split, shell=False, stdin=DEVNULL, and bounded timeout.
 
     Returns (returncode, duration, stdout, stderr, is_timeout).
     """
+    effective_timeout = timeout_seconds if timeout_seconds is not None else DEFAULT_VERIFICATION_TIMEOUT
     args = shlex.split(command_str)
     start_time = time.time()
     try:
@@ -164,7 +165,7 @@ def execute_criterion_command(
             text=True,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
-            timeout=timeout_seconds
+            timeout=effective_timeout
         )
         duration = time.time() - start_time
         return res.returncode, duration, res.stdout, res.stderr, False
@@ -231,7 +232,7 @@ def verify_change(
             budget_result=budget_result,
             criterion_results=criterion_results,
             mutations=[],
-            verdict="NEEDS_REVIEW",
+            verdict="FAIL",
             verified_at=now_str
         )
 
@@ -408,17 +409,20 @@ def verify_change(
             ))
 
     # 5. Evaluate Overall Delivery Verdict
-    is_pass = True
-    if has_budget_deviation:
-        is_pass = False
-    if all_mutations:
-        is_pass = False
-    for r in criterion_results:
-        if r.status != "VERIFIED":
-            is_pass = False
-            break
+    # Non-negotiable invariant: any machine failure (test failure, timeout, budget deviation,
+    # or Git mutation) MUST yield verdict = "FAIL". Human acceptance can only resolve pending
+    # manual criteria ("NEEDS_REVIEW") when all machine evidence is clean.
+    has_failed_criterion = any(r.status in ("FAILED", "REJECTED") for r in criterion_results)
+    has_machine_failure = has_failed_criterion or has_budget_deviation or bool(all_mutations)
 
-    verdict = "PASS" if is_pass else "NEEDS_REVIEW"
+    if has_machine_failure:
+        verdict = "FAIL"
+    elif any(r.status == "NEEDS_REVIEW" for r in criterion_results):
+        verdict = "NEEDS_REVIEW"
+    elif all(r.status == "VERIFIED" for r in criterion_results):
+        verdict = "PASS"
+    else:
+        verdict = "NEEDS_REVIEW"
 
     return VerificationResult(
         change_id=contract.change_id,
