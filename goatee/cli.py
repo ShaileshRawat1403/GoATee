@@ -5,6 +5,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 from goatee.core.parser import parse_change_contract, update_contract_state, ContractSyntaxError
 from goatee.core.budget import GitInspectionError
 

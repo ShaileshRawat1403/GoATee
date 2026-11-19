@@ -43,10 +43,50 @@ class TestLifecycle(unittest.TestCase):
         c_path.write_text(content, encoding="utf-8")
         return c_dir
 
+    def _write_valid_receipt(self, c_dir: Path, change_id: str, verdict: str = "NEEDS_REVIEW", head_sha: str = "1111111111111111"):
+        from goatee.core.verifier import VerificationResult, CriterionResult, render_receipt_markdown
+        from goatee.core.budget import BudgetComparisonResult
+
+        template_path = Path(__file__).parent.parent / "goatee" / "templates" / "receipt.md"
+        v_res = VerificationResult(
+            change_id=change_id,
+            baseline_commit=head_sha,
+            verified_commit=head_sha,
+            budget_result=BudgetComparisonResult(expected_changes=["app.py"]),
+            criterion_results=[
+                CriterionResult(
+                    criterion_id="AC-01",
+                    evidence_type="automated",
+                    declared="true (exit 0)",
+                    observed="exit 0",
+                    status="VERIFIED"
+                ),
+                CriterionResult(
+                    criterion_id="AC-02",
+                    evidence_type="manual",
+                    declared="visual check",
+                    observed="Pending",
+                    status="NEEDS_REVIEW"
+                )
+            ],
+            mutations=[],
+            verdict=verdict,
+            verified_at="2026-11-18 12:00:00Z"
+        )
+        receipt_text = render_receipt_markdown(v_res, template_path)
+        (c_dir / "receipt.md").write_text(receipt_text, encoding="utf-8")
+
     def test_land_requires_receipt(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             self._setup_repo(root, "001-feat")
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(root)
+            try:
+                parser.parse_args(["approve", "001-feat"]).func(parser.parse_args(["approve", "001-feat"]))
+            finally:
+                os.chdir(orig_cwd)
             with self.assertRaises(LifecycleError) as cm:
                 land_change(root, "001-feat")
             self.assertIn("delivery receipt missing", str(cm.exception))
@@ -55,7 +95,15 @@ class TestLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             c_dir = self._setup_repo(root, "001-feat")
-            (c_dir / "receipt.md").write_text("# Delivery Receipt: 001-feat\nVerdict: PASS\n", encoding="utf-8")
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(root)
+            try:
+                parser.parse_args(["approve", "001-feat"]).func(parser.parse_args(["approve", "001-feat"]))
+            finally:
+                os.chdir(orig_cwd)
+            res_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True)
+            self._write_valid_receipt(c_dir, "001-feat", verdict="NEEDS_REVIEW", head_sha=res_head.stdout.strip())
             with self.assertRaises(LifecycleError) as cm:
                 land_change(root, "001-feat")
             self.assertIn("human review missing", str(cm.exception))
@@ -64,8 +112,24 @@ class TestLifecycle(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             c_dir = self._setup_repo(root, "001-feat")
-            (c_dir / "receipt.md").write_text("# Delivery Receipt: 001-feat\nVerdict: NEEDS_REVIEW\n", encoding="utf-8")
-            (c_dir / "review.md").write_text("# Human Review: 001-feat\nReview-Verdict: REJECTED\n", encoding="utf-8")
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(root)
+            try:
+                parser.parse_args(["approve", "001-feat"]).func(parser.parse_args(["approve", "001-feat"]))
+            finally:
+                os.chdir(orig_cwd)
+            res_head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=root, capture_output=True, text=True, check=True)
+            head_sha = res_head.stdout.strip()
+            self._write_valid_receipt(c_dir, "001-feat", verdict="NEEDS_REVIEW", head_sha=head_sha)
+            subprocess.run(["git", "add", "."], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "chore: approve and receipt"], cwd=root, check=True, capture_output=True)
+
+            from goatee.core.attest import record_attestation
+            record_attestation(root, "001-feat", "AC-02", verified=False, rejected=True, note="Rejected")
+            subprocess.run(["git", "add", ".goatee/changes/001-feat/review.md"], cwd=root, check=True)
+            subprocess.run(["git", "commit", "-m", "chore: review"], cwd=root, check=True, capture_output=True)
+
             with self.assertRaises(LifecycleError) as cm:
                 land_change(root, "001-feat")
             self.assertIn("Must be 'ACCEPTED'", str(cm.exception))

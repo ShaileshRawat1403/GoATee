@@ -150,7 +150,7 @@ class TestAttest(unittest.TestCase):
         verdict: str = "NEEDS_REVIEW",
         ac01_status: str = "VERIFIED",
         ac02_status: str = "NEEDS_REVIEW"
-    ) -> Tuple[Path, str, str]:
+    ) -> tuple[Path, str, str]:
         """Helper to create and commit a verified change with receipt."""
         change_dir = self.repo / ".goatee" / "changes" / change_id
         change_dir.mkdir(parents=True, exist_ok=True)

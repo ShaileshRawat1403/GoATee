@@ -69,7 +69,7 @@ class TestVerifier(unittest.TestCase):
         )
 
         res = verify_change(contract, self.repo_root)
-        self.assertEqual(res.verdict, "NEEDS_REVIEW")
+        self.assertEqual(res.verdict, "FAIL")
         self.assertIn("unapproved.py", res.budget_result.surface_deviations)
         self.assertEqual(res.criterion_results[0].status, "NOT_RUN")
         self.assertIn("Blocked by unapproved budget deviations", res.criterion_results[0].observed)
@@ -103,7 +103,7 @@ class TestVerifier(unittest.TestCase):
         )
 
         res = verify_change(contract, self.repo_root)
-        self.assertEqual(res.verdict, "NEEDS_REVIEW")  # Because AC-02 failed
+        self.assertEqual(res.verdict, "FAIL")  # Because AC-02 failed
         self.assertEqual(res.criterion_results[0].status, "VERIFIED")
         self.assertIn("exit 0", res.criterion_results[0].observed)
 
@@ -173,7 +173,7 @@ class TestVerifier(unittest.TestCase):
         )
 
         res = verify_change(contract, self.repo_root)
-        self.assertEqual(res.verdict, "NEEDS_REVIEW")
+        self.assertEqual(res.verdict, "FAIL")
         self.assertEqual(res.criterion_results[0].status, "FAILED")
         self.assertIn("[MUTATED REPO]", res.criterion_results[0].observed)
         self.assertEqual(res.criterion_results[1].status, "NOT_RUN")
@@ -243,7 +243,7 @@ class TestVerifier(unittest.TestCase):
         )
 
         res = verify_change(contract, self.repo_root)
-        self.assertEqual(res.verdict, "NEEDS_REVIEW")
+        self.assertEqual(res.verdict, "FAIL")
         self.assertEqual(res.criterion_results[0].status, "FAILED")
         self.assertIn("HEAD MUTATION DETECTED", res.criterion_results[0].observed)
         self.assertIn("HEAD MUTATION DETECTED", res.criterion_results[0].diagnostic)
@@ -316,7 +316,7 @@ class TestVerifier(unittest.TestCase):
         )
 
         res = verify_change(contract, self.repo_root)
-        self.assertEqual(res.verdict, "NEEDS_REVIEW")
+        self.assertEqual(res.verdict, "FAIL")
         self.assertEqual(res.criterion_results[0].status, "FAILED")
         self.assertIn("[MUTATED REPO]", res.criterion_results[0].observed)
         self.assertEqual(res.criterion_results[1].status, "NOT_RUN")

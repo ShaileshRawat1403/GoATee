@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from goatee.core.budget import GitInspectionError
+from goatee.core.budget import GitInspectionError, is_control_artifact
 from goatee.core.linter import lint_change_contract, LintIssue
 from goatee.core.models import ChangeContract
 from goatee.core.parser import (
@@ -21,7 +21,10 @@ from goatee.core.status import (
     find_project_root,
     resolve_active_change_id,
     ControlStateError,
+    parse_receipt,
+    ReceiptSyntaxError,
 )
+from goatee.core.attest import load_and_validate_review
 from goatee.core.verifier import verify_change, render_receipt_markdown, VerificationResult
 
 
@@ -71,16 +74,28 @@ def run_ci(
         active = resolve_active_change_id(project_root)
         if active:
             target_change_ids = [active]
-        elif changes_dir.is_dir():
-            # If there's only 1 unarchived change, take it
-            candidates = sorted(
-                p.name for p in changes_dir.iterdir() if p.is_dir() and (p / "change.md").is_file()
+        else:
+            report = ChangeCIReport(
+                change_id="(unresolved)",
+                status="FAIL",
+                intent="",
+                baseline_commit=None,
+                verified_commit=None,
+                error_message=(
+                    "No active change contract could be unambiguously resolved from Git branch or workspace. "
+                    "Specify target change with 'goatee ci <change-id>' or pass '--all'."
+                ),
             )
-            if len(candidates) == 1:
-                target_change_ids = candidates
-            elif len(candidates) > 1:
-                # Default to all changes when none is individually singled out
-                target_change_ids = candidates
+            res = CIRunResult(
+                overall_status="FAIL",
+                exit_code=1,
+                allow_needs_review=allow_needs_review,
+                reports=[report],
+                project_root=project_root,
+            )
+            if write_step_summary:
+                write_github_step_summary(format_github_step_summary(res))
+            return res
 
     if not target_change_ids:
         report = ChangeCIReport(
@@ -262,27 +277,152 @@ def run_ci(
             has_fail = True
             continue
 
-        # Write delivery receipt only if explicitly requested
-        if write_receipt:
+        # Write delivery receipt only if explicitly requested and not already attested
+        receipt_file = changes_dir / cid / "receipt.md"
+        review_file = changes_dir / cid / "review.md"
+        if write_receipt and not review_file.is_file():
             receipt_content = render_receipt_markdown(verif_res, template_path)
-            receipt_file = changes_dir / cid / "receipt.md"
             receipt_file.write_text(receipt_content, encoding="utf-8")
 
-        # 6. Read human review if present
+        # 6. Read human review if present and validate its integrity against receipt
         human_verdict = None
-        review_file = changes_dir / cid / "review.md"
-        if review_file.is_file():
-            for line in review_file.read_text(encoding="utf-8").splitlines():
-                if line.startswith("Review-Verdict:"):
-                    human_verdict = line.split(":", 1)[1].strip()
-                    break
 
+        if review_file.is_file():
+            if not receipt_file.is_file():
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message="Review integrity violation: review.md exists but receipt.md is missing.",
+                    )
+                )
+                has_fail = True
+                continue
+
+            try:
+                receipt = parse_receipt(receipt_file)
+            except ReceiptSyntaxError as rse:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=f"Delivery receipt syntax error: {rse}",
+                    )
+                )
+                has_fail = True
+                continue
+
+            # Check application drift between verified commit in receipt and current HEAD
+            res_diff = subprocess.run(
+                ["git", "diff", "--name-only", receipt.verified_commit, "HEAD"],
+                capture_output=True,
+                text=True,
+                cwd=project_root
+            )
+            if res_diff.returncode != 0:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=f"Git inspection error during CI drift check: {res_diff.stderr.strip()}",
+                    )
+                )
+                has_fail = True
+                continue
+
+            app_diffs = [
+                f.strip() for f in res_diff.stdout.splitlines()
+                if f.strip() and not is_control_artifact(f.strip())
+            ]
+            if app_diffs:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=(
+                            f"Implementation was modified after verification at commit {receipt.verified_commit[:8]} "
+                            f"(modified files: {', '.join(app_diffs[:3])})."
+                        ),
+                    )
+                )
+                has_fail = True
+                continue
+
+            # Replay and validate full review integrity using load_and_validate_review
+            try:
+                review_record = load_and_validate_review(
+                    changes_dir / cid, contract, receipt, project_root
+                )
+                if review_record:
+                    human_verdict = review_record.verdict
+                else:
+                    human_verdict = None
+            except ControlStateError as cse:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=f"Review integrity violation: {cse}",
+                    )
+                )
+                has_fail = True
+                continue
+            except Exception as e:
+                reports.append(
+                    ChangeCIReport(
+                        change_id=cid,
+                        status="FAIL",
+                        intent=contract.intent,
+                        baseline_commit=contract.contract_state.baseline_commit,
+                        verified_commit=verif_res.verified_commit,
+                        lint_issues=lint_issues,
+                        verification_result=verif_res,
+                        human_verdict=None,
+                        error_message=f"Failed to validate human review: {e}",
+                    )
+                )
+                has_fail = True
+                continue
+
+        # Invariant: Human acceptance must NEVER override failed machine evidence
         change_status = verif_res.verdict
         if human_verdict == "REJECTED":
             change_status = "FAIL"
-        elif verif_res.verdict == "NEEDS_REVIEW" and human_verdict == "ACCEPTED":
-            # If human signed off on all manual criteria, it counts as PASS
+        elif verif_res.verdict in ("PASS", "NEEDS_REVIEW") and human_verdict == "ACCEPTED":
+            # If all automated checks passed (NEEDS_REVIEW) and human verified all manual criteria, it counts as PASS
             change_status = "PASS"
+        elif verif_res.verdict == "FAIL":
+            change_status = "FAIL"
 
         if change_status == "FAIL":
             has_fail = True
@@ -381,6 +521,15 @@ def format_github_step_summary(result: CIRunResult) -> str:
                     f"| **{row.criterion_id}** | `{row.evidence_type}` | `{row.declared}` | {row.observed} | **{status_badge}** |"
                 )
             lines.append("")
+
+            failed_criteria = [r for r in vr.criterion_results if r.status == "FAILED" and r.diagnostic]
+            if failed_criteria:
+                lines.append("### Failed Criteria Diagnostics\n")
+                for r in failed_criteria:
+                    lines.append(f"#### `{r.criterion_id}` Diagnostic")
+                    lines.append("```")
+                    lines.append(r.diagnostic.strip())
+                    lines.append("```\n")
 
             lines.append("### Build Budget &amp; Surface Analysis\n")
             lines.append(f"- **Expected Surface Changes**: {len(vr.budget_result.expected_changes)}")
