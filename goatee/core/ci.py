@@ -522,6 +522,15 @@ def format_github_step_summary(result: CIRunResult) -> str:
                 )
             lines.append("")
 
+            failed_criteria = [r for r in vr.criterion_results if r.status == "FAILED" and r.diagnostic]
+            if failed_criteria:
+                lines.append("### Failed Criteria Diagnostics\n")
+                for r in failed_criteria:
+                    lines.append(f"#### `{r.criterion_id}` Diagnostic")
+                    lines.append("```")
+                    lines.append(r.diagnostic.strip())
+                    lines.append("```\n")
+
             lines.append("### Build Budget &amp; Surface Analysis\n")
             lines.append(f"- **Expected Surface Changes**: {len(vr.budget_result.expected_changes)}")
             for fpath in vr.budget_result.expected_changes:
