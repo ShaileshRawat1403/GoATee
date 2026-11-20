@@ -435,6 +435,40 @@ class TestVerifier(unittest.TestCase):
         )
         self.assertEqual(format_failure_diagnostic(pass_result), "")
 
+    def test_bounded_excerpt_line_and_byte_bounds_with_unicode(self):
+        """Confirm 15-line and 2048-byte constraints are enforced including truncation notices, with Unicode handling."""
+        # 1. 100 lines of Unicode text
+        unicode_line = "🔥 GoATee 🐐 — 这是一个多字节测试 Unicode ää öö üü " * 5
+        large_unicode = "\n".join(f"Line {i:03d}: {unicode_line}" for i in range(100))
+
+        excerpt = bounded_excerpt(large_unicode, "", max_lines=15, max_bytes=2048)
+        lines = excerpt.splitlines()
+        encoded = excerpt.encode("utf-8")
+
+        self.assertLessEqual(len(lines), 15)
+        self.assertLessEqual(len(encoded), 2048)
+        self.assertIn("truncated to 2048 bytes", excerpt)
+        self.assertIn("truncation does not guarantee secret removal", excerpt)
+
+        # 2. Many short lines (line limit triggers before byte limit)
+        many_lines = "\n".join(f"Short line {i}" for i in range(50))
+        line_excerpt = bounded_excerpt(many_lines, "", max_lines=15, max_bytes=2048)
+        line_list = line_excerpt.splitlines()
+        self.assertLessEqual(len(line_list), 15)
+        self.assertTrue(line_list[0].startswith("..."))
+        self.assertEqual(line_list[-1], "Short line 49")
+
+        # 3. Single massive line (byte limit triggers before line limit)
+        single_massive = "A" * 10000
+        single_excerpt = bounded_excerpt(single_massive, "", max_lines=15, max_bytes=2048)
+        self.assertLessEqual(len(single_excerpt.encode("utf-8")), 2048)
+        self.assertIn("truncated to 2048 bytes", single_excerpt)
+
+        # 4. Strict byte limit on small max_bytes
+        small_excerpt = bounded_excerpt(large_unicode, "", max_lines=5, max_bytes=200)
+        self.assertLessEqual(len(small_excerpt.splitlines()), 5)
+        self.assertLessEqual(len(small_excerpt.encode("utf-8")), 200)
+
 
 if __name__ == "__main__":
     unittest.main()

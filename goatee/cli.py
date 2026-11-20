@@ -411,11 +411,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
     receipt_file = change_dir / "receipt.md"
     receipt_file.write_text(receipt_content, encoding="utf-8")
 
-    print(f"Verification complete for '{change_id}'.")
-    print(f"Verdict: {result.verdict}")
-    print(f"Delivery receipt compiled at {receipt_file}")
+    json_mode = getattr(args, "json", False)
+    if json_mode:
+        print(f"Verification complete for '{change_id}'.", file=sys.stderr)
+        print(f"Verdict: {result.verdict}", file=sys.stderr)
+        print(f"Delivery receipt compiled at {receipt_file}", file=sys.stderr)
+    else:
+        print(f"Verification complete for '{change_id}'.")
+        print(f"Verdict: {result.verdict}")
+        print(f"Delivery receipt compiled at {receipt_file}")
 
-    if getattr(args, "json", False):
+    if json_mode:
         import json
         payload = {
             "change_id": change_id,
@@ -439,6 +445,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "mutations": result.mutations,
         }
         print(json.dumps(payload, indent=2))
+        if result.verdict == "FAIL":
+            from goatee.core.verifier import format_failure_diagnostic
+            show_diag = getattr(args, "diagnostics", False)
+            diag_output = format_failure_diagnostic(result, show_details=show_diag)
+            if diag_output:
+                print(diag_output, file=sys.stderr)
     elif result.verdict == "FAIL":
         from goatee.core.verifier import format_failure_diagnostic
         show_diag = getattr(args, "diagnostics", False)

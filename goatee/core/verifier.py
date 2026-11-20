@@ -190,12 +190,31 @@ def bounded_excerpt(stdout: str, stderr: str, max_lines: int = 15, max_bytes: in
     if len(combined) <= max_lines:
         text = "\n".join(combined)
     else:
-        text = "...\n" + "\n".join(combined[-max_lines:])
+        if max_lines <= 1:
+            combined = ["..."]
+        else:
+            combined = ["..."] + combined[-(max_lines - 1):]
+        text = "\n".join(combined)
     
     encoded = text.encode("utf-8")
     if len(encoded) > max_bytes:
-        truncated = encoded[:max_bytes].decode("utf-8", errors="ignore")
-        text = truncated + f"\n... [truncated to {max_bytes} bytes; truncation does not guarantee secret removal]"
+        notice = f"\n... [truncated to {max_bytes} bytes; truncation does not guarantee secret removal]"
+        notice_bytes = len(notice.encode("utf-8"))
+        if max_bytes > notice_bytes:
+            sliced = encoded[:max_bytes - notice_bytes].decode("utf-8", errors="ignore")
+            sliced_lines = sliced.splitlines()
+            notice_line_count = len(notice.strip().splitlines())
+            allowed_sliced_lines = max_lines - notice_line_count
+            if len(sliced_lines) > allowed_sliced_lines:
+                if allowed_sliced_lines > 1:
+                    sliced_lines = ["..."] + sliced_lines[-(allowed_sliced_lines - 1):]
+                elif allowed_sliced_lines == 1:
+                    sliced_lines = ["..."]
+                else:
+                    sliced_lines = []
+            text = "\n".join(sliced_lines) + notice
+        else:
+            text = encoded[:max_bytes].decode("utf-8", errors="ignore")
     
     return text
 
@@ -534,14 +553,7 @@ def format_failure_diagnostic(
             if r.diagnostic:
                 has_diagnostics = True
                 if show_details:
-                    excerpt = r.diagnostic
-                    diag_lines = excerpt.splitlines()
-                    if len(diag_lines) > max_lines:
-                        excerpt = "...\n" + "\n".join(diag_lines[-max_lines:])
-                    diag_encoded = excerpt.encode("utf-8")
-                    if len(diag_encoded) > max_bytes:
-                        truncated_diag = diag_encoded[:max_bytes].decode("utf-8", errors="ignore")
-                        excerpt = truncated_diag + f"\n... [truncated to {max_bytes} bytes; truncation does not guarantee secret removal]"
+                    excerpt = bounded_excerpt(r.diagnostic, "", max_lines=max_lines, max_bytes=max_bytes)
                     lines.append("    Diagnostic Excerpt:")
                     for dl in excerpt.splitlines():
                         lines.append(f"      | {dl}")
