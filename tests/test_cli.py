@@ -1,6 +1,7 @@
 """Unit tests for the GoATee CLI commands: init, new, approve."""
 
 import io
+import json
 import os
 import subprocess
 import tempfile
@@ -1013,6 +1014,191 @@ class TestCLI(unittest.TestCase):
                     )
                 self.assertEqual(rc2, 0)
                 self.assertTrue((p / "custom.html").is_file())
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_verify_dirty_worktree_guidance(self):
+        """AC-02: verify on dirty worktree provides actionable guidance to use goatee check."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                subprocess.run(["git", "config", "user.email", "tester@test.local"], check=True)
+                (p / "README.md").write_text("# Test\n", encoding="utf-8")
+                subprocess.run(["git", "add", "README.md"], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-dirty"]).func(parser.parse_args(["new", "001-dirty"]))
+
+                # Prepare contract with approved state
+                change_file = p / ".goatee" / "changes" / "001-dirty" / "change.md"
+                content = change_file.read_text(encoding="utf-8")
+                content = content.replace("Agreement-Status: DRAFT", "Agreement-Status: APPROVED")
+                content = content.replace("Budget-Status: DRAFT", "Budget-Status: APPROVED")
+                change_file.write_text(content, encoding="utf-8")
+
+                parser.parse_args(["approve", "001-dirty"]).func(parser.parse_args(["approve", "001-dirty"]))
+
+                # Create uncommitted dirty file
+                (p / "dirty_file.py").write_text("# work in progress", encoding="utf-8")
+
+                stderr_buf = io.StringIO()
+                with patch("sys.stderr", stderr_buf):
+                    rc = parser.parse_args(["verify", "001-dirty"]).func(
+                        parser.parse_args(["verify", "001-dirty"])
+                    )
+
+                self.assertEqual(rc, 1)
+                stderr_text = stderr_buf.getvalue()
+                self.assertIn("VERIFICATION BLOCKED: Working tree must be clean.", stderr_text)
+                self.assertIn("Pre-flight check: Run 'goatee check' (or 'goatee check 001-dirty')", stderr_text)
+            finally:
+                os.chdir(orig_cwd)
+
+    def test_verify_json_output_purity(self):
+        """CLI regression test: goatee verify --json must output strictly one valid JSON document to stdout, sending human status to stderr."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                subprocess.run(["git", "config", "user.email", "tester@test.local"], check=True)
+                (p / "README.md").write_text("# Test\n", encoding="utf-8")
+                subprocess.run(["git", "add", "README.md"], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-json"]).func(parser.parse_args(["new", "001-json"]))
+
+                # Prepare clean approved contract
+                clean_contract = f"""# Change: 001-json
+
+## Intent
+Test JSON purity.
+
+## Agreed Scope
+### In Scope
+- JSON verification
+### Out of Scope
+- None
+
+## Acceptance Criteria
+- AC-01: Auto check
+  Evidence:
+    type: automated
+    command: python3 -c 'exit(0)'
+    expected: exit 0
+
+## Build Budget
+### Expected Surface
+- (none)
+### Reuse Strategy
+- stdlib
+Dependency-Policy: No new runtime dependencies
+### Blast Radius
+- (none)
+
+## Contract State
+Agreement-Status: APPROVED
+Budget-Status: APPROVED
+Baseline-Commit: 
+"""
+                change_file = p / ".goatee" / "changes" / "001-json" / "change.md"
+                change_file.write_text(clean_contract, encoding="utf-8")
+
+                parser.parse_args(["approve", "001-json"]).func(parser.parse_args(["approve", "001-json"]))
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "chore: approve change"], check=True, capture_output=True)
+
+                stdout_buf = io.StringIO()
+                stderr_buf = io.StringIO()
+                with patch("sys.stdout", stdout_buf), patch("sys.stderr", stderr_buf):
+                    rc = parser.parse_args(["verify", "001-json", "--json"]).func(
+                        parser.parse_args(["verify", "001-json", "--json"])
+                    )
+
+                self.assertEqual(rc, 0)
+                stdout_text = stdout_buf.getvalue().strip()
+                stderr_text = stderr_buf.getvalue()
+
+                # Verify stdout contains ONLY valid JSON and starts/ends with JSON object braces
+                self.assertTrue(stdout_text.startswith("{"), f"stdout should start with '{{': {stdout_text[:50]}")
+                self.assertTrue(stdout_text.endswith("}"), f"stdout should end with '}}': {stdout_text[-50:]}")
+                data = json.loads(stdout_text)
+                self.assertEqual(data["change_id"], "001-json")
+                self.assertEqual(data["verdict"], "PASS")
+
+                # Verify human-readable messages were routed to stderr
+                self.assertIn("Verification complete for '001-json'.", stderr_text)
+                self.assertIn("Verdict: PASS", stderr_text)
+                self.assertIn("Delivery receipt compiled at", stderr_text)
+
+                # Now test failure scenario with --json and --diagnostics
+                parser.parse_args(["new", "002-fail"]).func(parser.parse_args(["new", "002-fail"]))
+                fail_file = p / ".goatee" / "changes" / "002-fail" / "change.md"
+                fail_contract = f"""# Change: 002-fail
+
+## Intent
+Test JSON failure purity.
+
+## Agreed Scope
+### In Scope
+- Fail check
+### Out of Scope
+- None
+
+## Acceptance Criteria
+- AC-01: Auto fail check
+  Evidence:
+    type: automated
+    command: python3 -c 'exit(1)'
+    expected: exit 0
+
+## Build Budget
+### Expected Surface
+- (none)
+### Reuse Strategy
+- stdlib
+Dependency-Policy: No new runtime dependencies
+### Blast Radius
+- (none)
+
+## Contract State
+Agreement-Status: APPROVED
+Budget-Status: APPROVED
+Baseline-Commit: 
+"""
+                fail_file.write_text(fail_contract, encoding="utf-8")
+                parser.parse_args(["approve", "002-fail"]).func(parser.parse_args(["approve", "002-fail"]))
+                subprocess.run(["git", "add", "."], check=True)
+                subprocess.run(["git", "commit", "-m", "chore: approve fail change"], check=True, capture_output=True)
+
+                stdout_fail = io.StringIO()
+                stderr_fail = io.StringIO()
+                with patch("sys.stdout", stdout_fail), patch("sys.stderr", stderr_fail):
+                    rc_fail = parser.parse_args(["verify", "002-fail", "--json", "--diagnostics"]).func(
+                        parser.parse_args(["verify", "002-fail", "--json", "--diagnostics"])
+                    )
+
+                self.assertEqual(rc_fail, 1)
+                stdout_fail_text = stdout_fail.getvalue().strip()
+                stderr_fail_text = stderr_fail.getvalue()
+
+                self.assertTrue(stdout_fail_text.startswith("{"))
+                self.assertTrue(stdout_fail_text.endswith("}"))
+                data_fail = json.loads(stdout_fail_text)
+                self.assertEqual(data_fail["change_id"], "002-fail")
+                self.assertEqual(data_fail["verdict"], "FAIL")
+                self.assertIn("Verification complete for '002-fail'.", stderr_fail_text)
+                self.assertIn("Verification Failure Details", stderr_fail_text)
             finally:
                 os.chdir(orig_cwd)
 

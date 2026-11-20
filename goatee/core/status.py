@@ -5,7 +5,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from goatee.core.budget import compare_budget, get_git_changed_files, GitInspectionError
 from goatee.core.models import ChangeContract
@@ -22,7 +22,7 @@ class ReceiptSyntaxError(Exception):
     pass
 
 
-VALID_RECEIPT_VERDICTS: Set[str] = {"PASS", "NEEDS_REVIEW"}
+VALID_RECEIPT_VERDICTS: Set[str] = {"PASS", "NEEDS_REVIEW", "FAIL"}
 VALID_CRITERION_STATUSES: Set[str] = {"VERIFIED", "FAILED", "NEEDS_REVIEW", "NOT_RUN"}
 
 
@@ -71,6 +71,7 @@ class ChangeSummary:
     machine_verdict: str
     human_review: str
     coverage_summary: str
+    next_action: str = ""
 
 
 @dataclass(frozen=True)
@@ -106,6 +107,8 @@ class ChangeDetailReport:
     expected_surface: List[str] = field(default_factory=list)
     criteria_statuses: List[ReceiptRow] = field(default_factory=list)
     attestation_rows: List[AttestationRow] = field(default_factory=list)
+    next_action: str = ""
+    next_action_category: str = ""
 
 
 def find_project_root(cwd: Optional[Path] = None) -> Path:
@@ -416,6 +419,53 @@ def validate_contract_receipt_consistency(
         )
 
 
+def compute_next_action(
+    report: ChangeDetailReport,
+    contract: Optional[ChangeContract],
+    repo_root: Path
+) -> Tuple[str, str]:
+    """Compute deterministic lifecycle-aware next action and its category."""
+    # 1. Landed or archived
+    if contract and getattr(contract, "contract_state", None):
+        lifecycle = getattr(contract.contract_state, "lifecycle_status", None)
+        if lifecycle in ("LANDED", "ARCHIVED"):
+            return "Completed", f"Change '{report.change_id}' is {lifecycle.lower()} and archived in repository history."
+
+    archive_dir = repo_root / ".goatee" / "archive" / report.change_id
+    if archive_dir.is_dir() and (archive_dir / "change.md").is_file():
+        return "Completed", f"Change '{report.change_id}' is archived in repository history."
+
+    # 2. DRAFT state (Baseline not locked)
+    if report.agreement_status != "APPROVED" or report.budget_status != "APPROVED" or not report.baseline_commit:
+        return "Human Gate", f"Review contract and budget in .goatee/changes/{report.change_id}/change.md; set Agreement-Status and Budget-Status to APPROVED, then run 'goatee approve {report.change_id}'."
+
+    # 3. APPROVED state (Candidate / In Progress, pre-verification)
+    if not report.is_verified:
+        if report.surface_deviations or report.protected_changes:
+            return "Blocked State", f"Unapproved budget deviations detected. Run 'goatee check {report.change_id}' to inspect, or 'goatee amend {report.change_id} --add-surface <path> --note <note>' if expansion is authorized."
+        if report.working_tree == "DIRTY":
+            return "Machine Action", f"Implementation in progress. Test budget with 'goatee check {report.change_id}'; commit candidate changes and run 'goatee verify {report.change_id}'."
+        return "Machine Action", f"Implement changes within approved expected surface. Test with 'goatee check {report.change_id}'; commit candidate and run 'goatee verify {report.change_id}'."
+
+    # 4. Machine verification failed
+    if report.machine_verdict == "FAIL" or report.acceptance_blocked_reason:
+        return "Blocked State", f"Machine verification failed. Inspect receipt in .goatee/changes/{report.change_id}/receipt.md, fix implementation, commit, and re-run 'goatee verify {report.change_id}'."
+
+    # 5. Machine verification clean (NEEDS_REVIEW or PASS), but human review rejected or pending
+    has_manual_criteria = any(r.criterion_type == "manual" for r in report.criteria_statuses)
+    if report.human_review == "REJECTED":
+        return "Blocked State", f"Human review rejected. Review feedback in .goatee/changes/{report.change_id}/review.md, address concerns in implementation, commit, and re-run 'goatee verify {report.change_id}'."
+
+    if has_manual_criteria and report.human_review != "ACCEPTED":
+        return "Human Gate", f"Machine verification clean. Human attestation required: run 'goatee attest {report.change_id} -i' or 'goatee attest {report.change_id} --decision <criterion_id>=<VERIFIED|REJECTED>:<note>'."
+
+    # 6. Accepted delivery (Machine PASS with zero manual criteria, or machine-clean with human ACCEPTED)
+    if (report.machine_verdict == "PASS" and not has_manual_criteria) or report.human_review == "ACCEPTED":
+        return "Human / CI Gate", f"Delivery contract satisfied. Open/merge pull request into main preserving commit ancestry. After merging to main, run 'goatee land {report.change_id}' on trunk."
+
+    return "Human Gate", f"Review status of change '{report.change_id}'."
+
+
 def get_change_report(
     repo_root: Path,
     change_id: str,
@@ -473,7 +523,8 @@ def get_change_report(
         acceptance_blocked_reason = None
         if human_review == "PENDING":
             flawed_machine = (
-                any(r.status in ("FAILED", "NOT_RUN") for r in receipt.rows if r.criterion_type == "automated")
+                receipt.verdict == "FAIL"
+                or any(r.status in ("FAILED", "NOT_RUN") for r in receipt.rows if r.criterion_type == "automated")
                 or len(receipt.surface_deviations) > 0
                 or len(receipt.protected_changes) > 0
                 or len(receipt.mutations) > 0
@@ -481,7 +532,7 @@ def get_change_report(
             if flawed_machine:
                 acceptance_blocked_reason = "Acceptance blocked by machine evidence."
 
-        return ChangeDetailReport(
+        initial_report = ChangeDetailReport(
             change_id=change_id,
             intent=intent,
             agreement_status=contract.contract_state.agreement_status,
@@ -503,6 +554,32 @@ def get_change_report(
             expected_surface=contract.build_budget.expected_surface,
             criteria_statuses=receipt.rows,
             attestation_rows=attestation_rows,
+        )
+        cat, action = compute_next_action(initial_report, contract, repo_root)
+        return ChangeDetailReport(
+            change_id=initial_report.change_id,
+            intent=initial_report.intent,
+            agreement_status=initial_report.agreement_status,
+            budget_status=initial_report.budget_status,
+            baseline_commit=initial_report.baseline_commit,
+            working_tree=initial_report.working_tree,
+            is_verified=initial_report.is_verified,
+            verified_commit=initial_report.verified_commit,
+            verified_at=initial_report.verified_at,
+            machine_verdict=initial_report.machine_verdict,
+            human_review=initial_report.human_review,
+            acceptance_blocked_reason=initial_report.acceptance_blocked_reason,
+            review_updated_at=initial_report.review_updated_at,
+            latest_reviewer=initial_report.latest_reviewer,
+            receipt_sha256=initial_report.receipt_sha256,
+            expected_changes=initial_report.expected_changes,
+            surface_deviations=initial_report.surface_deviations,
+            protected_changes=initial_report.protected_changes,
+            expected_surface=initial_report.expected_surface,
+            criteria_statuses=initial_report.criteria_statuses,
+            attestation_rows=initial_report.attestation_rows,
+            next_action=action,
+            next_action_category=cat,
         )
     else:
         # Unverified change: pre-verification candidate budget inspection
@@ -534,7 +611,7 @@ def get_change_report(
             for ac in contract.acceptance_criteria
         ]
 
-        return ChangeDetailReport(
+        initial_report = ChangeDetailReport(
             change_id=change_id,
             intent=intent,
             agreement_status=contract.contract_state.agreement_status,
@@ -551,6 +628,27 @@ def get_change_report(
             protected_changes=prot,
             expected_surface=contract.build_budget.expected_surface,
             criteria_statuses=pending_rows,
+        )
+        cat, action = compute_next_action(initial_report, contract, repo_root)
+        return ChangeDetailReport(
+            change_id=initial_report.change_id,
+            intent=initial_report.intent,
+            agreement_status=initial_report.agreement_status,
+            budget_status=initial_report.budget_status,
+            baseline_commit=initial_report.baseline_commit,
+            working_tree=initial_report.working_tree,
+            is_verified=initial_report.is_verified,
+            candidate_commit=initial_report.candidate_commit,
+            machine_verdict=initial_report.machine_verdict,
+            human_review=initial_report.human_review,
+            budget_snapshot_label=initial_report.budget_snapshot_label,
+            expected_changes=initial_report.expected_changes,
+            surface_deviations=initial_report.surface_deviations,
+            protected_changes=initial_report.protected_changes,
+            expected_surface=initial_report.expected_surface,
+            criteria_statuses=initial_report.criteria_statuses,
+            next_action=action,
+            next_action_category=cat,
         )
 
 
@@ -585,6 +683,7 @@ def _build_change_summary(
         machine_verdict=detail.machine_verdict,
         human_review=detail.human_review,
         coverage_summary=coverage,
+        next_action=detail.next_action,
     )
 
 
@@ -641,7 +740,12 @@ def format_project_overview(report: ProjectStatusReport, show_archived: bool = F
             lines.append(f"  Machine: {c.machine_verdict}")
             lines.append(f"  Human: {c.human_review}")
             lines.append(f"  Coverage: {c.coverage_summary}")
+            if c.next_action:
+                lines.append(f"  Next: {c.next_action}")
             lines.append("")
+
+    if len(report.changes) > 1:
+        lines.append("Notice: Multiple active changes present. Specify change ID to inspect details: 'goatee status <change-id>'.\n")
 
     if report.archived_changes:
         if show_archived:
@@ -678,6 +782,10 @@ def format_change_detail(report: ChangeDetailReport, contract: Optional[ChangeCo
         f"Working Tree: {report.working_tree}",
         ""
     ]
+
+    if report.next_action:
+        lines.append(f"Next Action: [{report.next_action_category}] {report.next_action}")
+        lines.append("")
 
     if report.is_verified:
         lines.append("Evidence State: (receipt snapshot)")

@@ -678,6 +678,166 @@ Verified-Commit: abcdef1234567890
             self.assertEqual(snapshot.rows[0].observed, "output with | pipe")
             self.assertEqual(snapshot.rows[0].status, "VERIFIED")
 
+    def test_lifecycle_next_action_guidance(self):
+        """AC-06: Lifecycle next-action guidance resolves accurate state-machine recommendations across all change phases and disambiguates trunk."""
+        head_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        # Phase 1: DRAFT state (Baseline not locked, Agreement-Status DRAFT)
+        c_draft = self.repo / ".goatee" / "changes" / "015-draft"
+        c_draft.mkdir()
+        c_draft_md = SAMPLE_CHANGE_MD_TEMPLATE.format(
+            change_id="015-draft",
+            agreement_status="DRAFT",
+            budget_status="DRAFT",
+            baseline_commit="",
+        )
+        (c_draft / "change.md").write_text(c_draft_md, encoding="utf-8")
+
+        rep_draft = get_change_report(self.repo, "015-draft", "CLEAN", head_sha)
+        self.assertEqual(rep_draft.next_action_category, "Human Gate")
+        self.assertIn("goatee approve 015-draft", rep_draft.next_action)
+        self.assertIn("Next Action: [Human Gate]", format_change_detail(rep_draft))
+
+        # Phase 2: APPROVED (Candidate in progress, clean working tree)
+        c_approved = self.repo / ".goatee" / "changes" / "015-approved"
+        c_approved.mkdir()
+        c_appr_md = SAMPLE_CHANGE_MD_TEMPLATE.format(
+            change_id="015-approved",
+            agreement_status="APPROVED",
+            budget_status="APPROVED",
+            baseline_commit=head_sha,
+        )
+        (c_approved / "change.md").write_text(c_appr_md, encoding="utf-8")
+
+        rep_approved = get_change_report(self.repo, "015-approved", "CLEAN", head_sha)
+        self.assertEqual(rep_approved.next_action_category, "Machine Action")
+        self.assertIn("goatee verify 015-approved", rep_approved.next_action)
+
+        # Phase 3: Machine verification failed (Verdict: FAIL)
+        c_fail = self.repo / ".goatee" / "changes" / "015-fail"
+        c_fail.mkdir()
+        c_fail_md = SAMPLE_CHANGE_MD_TEMPLATE.format(
+            change_id="015-fail",
+            agreement_status="APPROVED",
+            budget_status="APPROVED",
+            baseline_commit=head_sha,
+        )
+        (c_fail / "change.md").write_text(c_fail_md, encoding="utf-8")
+        c_fail_rc = SAMPLE_RECEIPT_MD_TEMPLATE.format(
+            change_id="015-fail",
+            verdict="FAIL",
+            baseline_commit=head_sha,
+            verified_commit=head_sha,
+            ac02_status="NEEDS_REVIEW",
+        ).replace("**VERIFIED**", "**FAILED**", 1)  # Make AC-01 automated check FAILED
+        (c_fail / "receipt.md").write_text(c_fail_rc, encoding="utf-8")
+
+        rep_fail = get_change_report(self.repo, "015-fail", "CLEAN", head_sha)
+        self.assertEqual(rep_fail.machine_verdict, "FAIL")
+        self.assertEqual(rep_fail.acceptance_blocked_reason, "Acceptance blocked by machine evidence.")
+        self.assertEqual(rep_fail.next_action_category, "Blocked State")
+        self.assertIn("Machine verification failed", rep_fail.next_action)
+        self.assertIn("receipt.md", rep_fail.next_action)
+        self.assertIn("Next Action: [Blocked State]", format_change_detail(rep_fail))
+        self.assertIn("Machine Verdict: FAIL", format_change_detail(rep_fail))
+
+        # Phase 4: NEEDS_REVIEW with pending manual review
+        c_nr = self.repo / ".goatee" / "changes" / "015-nr"
+        c_nr.mkdir()
+        c_nr_md = SAMPLE_CHANGE_MD_TEMPLATE.format(
+            change_id="015-nr",
+            agreement_status="APPROVED",
+            budget_status="APPROVED",
+            baseline_commit=head_sha,
+        )
+        (c_nr / "change.md").write_text(c_nr_md, encoding="utf-8")
+        c_nr_rc = SAMPLE_RECEIPT_MD_TEMPLATE.format(
+            change_id="015-nr",
+            verdict="NEEDS_REVIEW",
+            baseline_commit=head_sha,
+            verified_commit=head_sha,
+            ac02_status="NEEDS_REVIEW",
+        )
+        (c_nr / "receipt.md").write_text(c_nr_rc, encoding="utf-8")
+
+        rep_nr = get_change_report(self.repo, "015-nr", "CLEAN", head_sha)
+        self.assertEqual(rep_nr.next_action_category, "Human Gate")
+        self.assertIn("goatee attest 015-nr", rep_nr.next_action)
+
+        # Phase 5: ACCEPTED (Machine PASS with zero manual criteria)
+        c_pass = self.repo / ".goatee" / "changes" / "015-pass"
+        c_pass.mkdir()
+        c_pass_md = f"""# Change: 015-pass
+## Intent
+Feature without manual criteria.
+## Agreed Scope
+### In Scope
+- Core
+### Out of Scope
+- Extra
+## Acceptance Criteria
+- AC-01: Auto check
+  Evidence:
+    type: automated
+    command: python3 -c 'exit(0)'
+    expected: exit 0
+## Build Budget
+### Expected Surface
+- src/app.py
+### Reuse Strategy
+- stdlib
+Dependency-Policy: No new runtime dependencies
+### Blast Radius
+- src/core/
+## Contract State
+Agreement-Status: APPROVED
+Budget-Status: APPROVED
+Baseline-Commit: {head_sha}
+"""
+        (c_pass / "change.md").write_text(c_pass_md, encoding="utf-8")
+        c_pass_rc = f"""# Delivery Receipt: 015-pass
+Verdict: PASS
+Verified-At: 2026-09-20 12:00:00Z
+## Commit Provenance
+Baseline-Commit: {head_sha}
+Verified-Commit: {head_sha}
+## Requirement Coverage Matrix
+| Criterion | Type | Declared Verification | Observed Result | Status |
+| :--- | :---: | :--- | :--- | :---: |
+| **AC-01** | automated | `python3 -c 'exit(0)'` | exit 0 | **VERIFIED** |
+## Build Budget & Surface Analysis
+### Expected Changes
+- src/app.py
+### Surface Deviations
+- (none)
+### Protected Changes
+- (none)
+## Git-Visible Mutation Report
+- Zero Git-visible repository mutations detected during verification.
+## Diagnostic Excerpt
+- No diagnostics recorded.
+"""
+        (c_pass / "receipt.md").write_text(c_pass_rc, encoding="utf-8")
+
+        rep_pass = get_change_report(self.repo, "015-pass", "CLEAN", head_sha)
+        self.assertEqual(rep_pass.next_action_category, "Human / CI Gate")
+        self.assertIn("goatee land 015-pass", rep_pass.next_action)
+
+        # Phase 6: Landed / Archived
+        arch_dir = self.repo / ".goatee" / "archive" / "014-prev"
+        arch_dir.mkdir(parents=True)
+        (arch_dir / "change.md").write_text(c_pass_md.replace("015-pass", "014-prev"), encoding="utf-8")
+        rep_arch = get_change_report(self.repo, "014-prev", "CLEAN", head_sha)
+        self.assertEqual(rep_arch.next_action_category, "Completed")
+        self.assertIn("archived in repository history", rep_arch.next_action)
+
+        # Multi-change project overview disambiguation notice
+        proj_stat = get_project_status(self.repo)
+        overview = format_project_overview(proj_stat)
+        self.assertIn("Notice: Multiple active changes present. Specify change ID to inspect details: 'goatee status <change-id>'.", overview)
+
 
 if __name__ == "__main__":
     unittest.main()

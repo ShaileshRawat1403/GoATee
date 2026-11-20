@@ -176,8 +176,8 @@ def execute_criterion_command(
         return None, duration, stdout, stderr, True
 
 
-def bounded_excerpt(stdout: str, stderr: str, max_lines: int = 10) -> str:
-    """Extract bounded diagnostic snippet from stdout and stderr."""
+def bounded_excerpt(stdout: str, stderr: str, max_lines: int = 15, max_bytes: int = 2048) -> str:
+    """Extract bounded diagnostic snippet from stdout and stderr with line and byte limits."""
     combined = []
     if stdout.strip():
         combined.extend(stdout.splitlines())
@@ -188,9 +188,35 @@ def bounded_excerpt(stdout: str, stderr: str, max_lines: int = 10) -> str:
         return "(no output)"
     
     if len(combined) <= max_lines:
-        return "\n".join(combined)
+        text = "\n".join(combined)
+    else:
+        if max_lines <= 1:
+            combined = ["..."]
+        else:
+            combined = ["..."] + combined[-(max_lines - 1):]
+        text = "\n".join(combined)
     
-    return "...\n" + "\n".join(combined[-max_lines:])
+    encoded = text.encode("utf-8")
+    if len(encoded) > max_bytes:
+        notice = f"\n... [truncated to {max_bytes} bytes; truncation does not guarantee secret removal]"
+        notice_bytes = len(notice.encode("utf-8"))
+        if max_bytes > notice_bytes:
+            sliced = encoded[:max_bytes - notice_bytes].decode("utf-8", errors="ignore")
+            sliced_lines = sliced.splitlines()
+            notice_line_count = len(notice.strip().splitlines())
+            allowed_sliced_lines = max_lines - notice_line_count
+            if len(sliced_lines) > allowed_sliced_lines:
+                if allowed_sliced_lines > 1:
+                    sliced_lines = ["..."] + sliced_lines[-(allowed_sliced_lines - 1):]
+                elif allowed_sliced_lines == 1:
+                    sliced_lines = ["..."]
+                else:
+                    sliced_lines = []
+            text = "\n".join(sliced_lines) + notice
+        else:
+            text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    
+    return text
 
 
 def verify_change(
@@ -481,3 +507,61 @@ def render_receipt_markdown(result: VerificationResult, template_path: Path) -> 
         mutation_report=mut_report,
         diagnostic_excerpt=diagnostics
     )
+
+
+def format_failure_diagnostic(
+    result: VerificationResult,
+    show_details: bool = False,
+    max_lines: int = 15,
+    max_bytes: int = 2048,
+) -> str:
+    """Format actionable terminal failure metadata, gating detailed excerpts behind show_details."""
+    if result.verdict != "FAIL":
+        return ""
+
+    lines = ["\n--- Verification Failure Details ---"]
+
+    # 1. Build Budget deviations
+    if result.budget_result.surface_deviations or result.budget_result.protected_changes:
+        lines.append("Build Budget Deviations:")
+        if result.budget_result.surface_deviations:
+            lines.append(f"  Surface Deviations ({len(result.budget_result.surface_deviations)}):")
+            for d in result.budget_result.surface_deviations:
+                lines.append(f"    - {d}")
+        if result.budget_result.protected_changes:
+            lines.append(f"  Protected Changes ({len(result.budget_result.protected_changes)}):")
+            for p in result.budget_result.protected_changes:
+                lines.append(f"    - {p}")
+        lines.append("  Action: Run 'goatee check' to inspect working tree; if intentional, use 'goatee amend --add-surface <path> --note <note>'.")
+
+    # 2. Repository mutations
+    if result.mutations:
+        lines.append(f"Repository Mutations Detected ({len(result.mutations)}):")
+        for m in result.mutations:
+            lines.append(f"  - {m}")
+        lines.append("  Action: Ensure test commands do not write untracked files or mutate repository HEAD.")
+
+    # 3. Failing criteria
+    failing_rows = [r for r in result.criterion_results if r.status in ("FAILED", "NOT_RUN")]
+    if failing_rows:
+        lines.append(f"Failing Criteria ({len(failing_rows)}):")
+        has_diagnostics = False
+        for r in failing_rows:
+            lines.append(f"  - [{r.status}] {r.criterion_id} ({r.evidence_type})")
+            lines.append(f"    Declared: {r.declared}")
+            lines.append(f"    Observed: {r.observed}")
+            if r.diagnostic:
+                has_diagnostics = True
+                if show_details:
+                    excerpt = bounded_excerpt(r.diagnostic, "", max_lines=max_lines, max_bytes=max_bytes)
+                    lines.append("    Diagnostic Excerpt:")
+                    for dl in excerpt.splitlines():
+                        lines.append(f"      | {dl}")
+
+        if not show_details and has_diagnostics:
+            lines.append("\nNotice: Detailed command output excerpts hidden by default to protect sensitive data.")
+            lines.append("Re-run with 'goatee verify --diagnostics' (or -d) to view bounded command output excerpts.")
+
+    lines.append("Action: Inspect receipt in .goatee/changes/<change_id>/receipt.md, fix implementation, and re-run 'goatee verify'.")
+    lines.append("------------------------------------")
+    return "\n".join(lines)

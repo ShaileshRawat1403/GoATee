@@ -118,14 +118,20 @@ def handle_get_contract(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     change_id = args.get("change_id") or resolve_active_change_id(root)
     if not change_id:
         return {
-            "content": [{"type": "text", "text": "Error: No change-id provided and active change could not be uniquely inferred."}],
+            "content": [{
+                "type": "text",
+                "text": "Error: No change-id provided and active change could not be uniquely inferred.\nRecovery Suggestion: Specify 'change_id' parameter, or checkout a feature branch with change prefix (e.g. 'feat/<change-id>')."
+            }],
             "isError": True
         }
 
     contract_path = root / ".goatee" / "changes" / change_id / "change.md"
     if not contract_path.is_file():
         return {
-            "content": [{"type": "text", "text": f"Error: Change contract not found for '{change_id}' at {contract_path}."}],
+            "content": [{
+                "type": "text",
+                "text": f"Error: Change contract not found for '{change_id}' at {contract_path}.\nRecovery Suggestion: Verify change_id exists in .goatee/changes/ or create a new contract with 'goatee new {change_id}'."
+            }],
             "isError": True
         }
 
@@ -133,9 +139,50 @@ def handle_get_contract(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
         contract = parse_change_contract(contract_path)
     except ContractSyntaxError as cse:
         return {
-            "content": [{"type": "text", "text": f"Contract syntax error in '{change_id}': {cse}"}],
+            "content": [{
+                "type": "text",
+                "text": f"Contract syntax error in '{change_id}': {cse}\nRecovery Suggestion: Run 'goatee lint {change_id}' to identify and correct contract syntax errors."
+            }],
             "isError": True
         }
+
+    # Extract project constraints from project.md if available
+    project_file = root / ".goatee" / "project.md"
+    project_constraints = []
+    if project_file.is_file():
+        proj_text = project_file.read_text(encoding="utf-8")
+        idx = proj_text.find("## Permanent Constraints")
+        if idx != -1:
+            sub = proj_text[idx + len("## Permanent Constraints"):]
+            end_idx = sub.find("## ")
+            if end_idx != -1:
+                sub = sub[:end_idx]
+            for l in sub.splitlines():
+                l = l.strip()
+                if l.startswith("- "):
+                    project_constraints.append(l[2:].strip())
+    if not project_constraints:
+        project_constraints = ["Standard library only at runtime; no external runtime dependencies."]
+
+    implementation_rules = [
+        "Stay strictly within the approved agreement and scope.",
+        "Prefer existing project capabilities, libraries, and standard library.",
+        "Do not alter unrelated behavior or refactor untouched modules.",
+        "Do not add runtime dependencies unless explicitly approved.",
+        "If implementation requires leaving the approved budget or touching protected surface, stop and report the proposed deviation."
+    ]
+
+    # Resolve next action guidance
+    next_action_text = ""
+    next_action_cat = ""
+    try:
+        working_tree = get_working_tree_state(root)
+        current_head = resolve_current_head(root)
+        report = get_change_report(root, change_id, working_tree, current_head)
+        next_action_text = report.next_action
+        next_action_cat = report.next_action_category
+    except Exception:
+        pass
 
     # Format structured contract representation
     result = {
@@ -162,7 +209,11 @@ def handle_get_contract(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
             "reuse_strategy": contract.build_budget.reuse_strategy if contract.build_budget else [],
             "dependency_policy": contract.build_budget.dependency_policy if contract.build_budget else "",
             "blast_radius": contract.build_budget.blast_radius if contract.build_budget else []
-        }
+        },
+        "project_constraints": project_constraints,
+        "implementation_rules": implementation_rules,
+        "next_action": next_action_text,
+        "next_action_category": next_action_cat,
     }
 
     return {
@@ -175,14 +226,20 @@ def handle_check_budget(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     change_id = args.get("change_id") or resolve_active_change_id(root)
     if not change_id:
         return {
-            "content": [{"type": "text", "text": "Error: No change-id provided and active change could not be uniquely inferred."}],
+            "content": [{
+                "type": "text",
+                "text": "Error: No change-id provided and active change could not be uniquely inferred.\nRecovery Suggestion: Specify 'change_id' parameter, or checkout a feature branch with change prefix (e.g. 'feat/<change-id>')."
+            }],
             "isError": True
         }
 
     change_file = root / ".goatee" / "changes" / change_id / "change.md"
     if not change_file.is_file():
         return {
-            "content": [{"type": "text", "text": f"Error: Change contract not found at {change_file}."}],
+            "content": [{
+                "type": "text",
+                "text": f"Error: Change contract not found at {change_file}.\nRecovery Suggestion: Verify change_id exists in .goatee/changes/."
+            }],
             "isError": True
         }
 
@@ -190,20 +247,29 @@ def handle_check_budget(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
         contract = parse_change_contract(change_file)
     except ContractSyntaxError as cse:
         return {
-            "content": [{"type": "text", "text": f"Contract syntax error in '{change_id}': {cse}"}],
+            "content": [{
+                "type": "text",
+                "text": f"Contract syntax error in '{change_id}': {cse}\nRecovery Suggestion: Run 'goatee lint {change_id}' to fix syntax errors."
+            }],
             "isError": True
         }
 
     baseline = contract.contract_state.baseline_commit
     if not baseline:
         return {
-            "content": [{"type": "text", "text": f"Error: Change '{change_id}' has no Baseline-Commit locked. Run 'goatee approve {change_id}' before checking budget."}],
+            "content": [{
+                "type": "text",
+                "text": f"Error: Change '{change_id}' has no Baseline-Commit locked.\nRecovery Suggestion: Run 'goatee approve {change_id}' before checking budget."
+            }],
             "isError": True
         }
 
     if not contract.build_budget:
         return {
-            "content": [{"type": "text", "text": f"Error: Change '{change_id}' has no Build Budget declared."}],
+            "content": [{
+                "type": "text",
+                "text": f"Error: Change '{change_id}' has no Build Budget declared.\nRecovery Suggestion: Add '## Build Budget' section to change.md or propose one via 'goatee_propose_budget'."
+            }],
             "isError": True
         }
 
@@ -212,7 +278,10 @@ def handle_check_budget(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
         comparison = compare_budget(changed_files, contract.build_budget)
     except GitInspectionError as gie:
         return {
-            "content": [{"type": "text", "text": f"Git inspection error: {gie}"}],
+            "content": [{
+                "type": "text",
+                "text": f"Git inspection error: {gie}\nRecovery Suggestion: Inspect git status and working tree."
+            }],
             "isError": True
         }
 
@@ -238,7 +307,10 @@ def handle_check_budget(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     )
 
     return {
-        "content": [{"type": "text", "text": summary_text}],
+        "content": [
+            {"type": "text", "text": summary_text},
+            {"type": "text", "text": json.dumps(report, indent=2)}
+        ],
         "isError": not passed
     }
 
@@ -282,14 +354,20 @@ def handle_propose_budget(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     change_id = args.get("change_id") or resolve_active_change_id(root)
     if not change_id:
         return {
-            "content": [{"type": "text", "text": "Error: No change-id provided and active change could not be uniquely inferred."}],
+            "content": [{
+                "type": "text",
+                "text": "Error: No change-id provided and active change could not be uniquely inferred.\nRecovery Suggestion: Specify 'change_id' parameter, or checkout a feature branch with change prefix (e.g. 'feat/<change-id>')."
+            }],
             "isError": True
         }
 
     contract_path = root / ".goatee" / "changes" / change_id / "change.md"
     if not contract_path.is_file():
         return {
-            "content": [{"type": "text", "text": f"Error: Change contract not found for '{change_id}' at {contract_path}."}],
+            "content": [{
+                "type": "text",
+                "text": f"Error: Change contract not found for '{change_id}' at {contract_path}.\nRecovery Suggestion: Verify change_id exists or create a contract with 'goatee new {change_id}'."
+            }],
             "isError": True
         }
 
@@ -297,13 +375,19 @@ def handle_propose_budget(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
         contract = parse_change_contract(contract_path)
     except ContractSyntaxError as cse:
         return {
-            "content": [{"type": "text", "text": f"Contract syntax error in '{change_id}': {cse}"}],
+            "content": [{
+                "type": "text",
+                "text": f"Contract syntax error in '{change_id}': {cse}\nRecovery Suggestion: Run 'goatee lint {change_id}' to fix syntax errors."
+            }],
             "isError": True
         }
 
     if contract.contract_state.budget_status == "APPROVED" and contract.contract_state.baseline_commit:
         return {
-            "content": [{"type": "text", "text": f"Error: Change '{change_id}' already has an APPROVED budget and locked baseline commit. Use 'goatee amend' for post-approval amendments."}],
+            "content": [{
+                "type": "text",
+                "text": f"Error: Change '{change_id}' already has an APPROVED budget and locked baseline commit.\nRecovery Suggestion: Use 'goatee amend {change_id} --add-surface <path> --note <note>' for post-approval budget expansion."
+            }],
             "isError": True
         }
 
@@ -358,7 +442,10 @@ def handle_lint_contract(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
     change_id = args.get("change_id") or resolve_active_change_id(root)
     if not change_id:
         return {
-            "content": [{"type": "text", "text": "Error: No change-id provided and active change could not be uniquely inferred."}],
+            "content": [{
+                "type": "text",
+                "text": "Error: No change-id provided and active change could not be uniquely inferred.\nRecovery Suggestion: Specify 'change_id' parameter, or checkout a feature branch with change prefix (e.g. 'feat/<change-id>')."
+            }],
             "isError": True
         }
 
@@ -368,7 +455,10 @@ def handle_lint_contract(args: Dict[str, Any], root: Path) -> Dict[str, Any]:
 
     if not contract_path.is_file():
         return {
-            "content": [{"type": "text", "text": f"Error: Change contract not found for '{change_id}' at {contract_path}."}],
+            "content": [{
+                "type": "text",
+                "text": f"Error: Change contract not found for '{change_id}' at {contract_path}.\nRecovery Suggestion: Verify change_id exists or create a contract with 'goatee new {change_id}'."
+            }],
             "isError": True
         }
 
