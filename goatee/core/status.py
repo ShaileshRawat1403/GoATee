@@ -5,7 +5,7 @@ import re
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 from goatee.core.budget import compare_budget, get_git_changed_files, GitInspectionError
 from goatee.core.models import ChangeContract
