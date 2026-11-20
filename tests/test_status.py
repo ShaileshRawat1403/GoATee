@@ -727,7 +727,7 @@ Verified-Commit: abcdef1234567890
         (c_fail / "change.md").write_text(c_fail_md, encoding="utf-8")
         c_fail_rc = SAMPLE_RECEIPT_MD_TEMPLATE.format(
             change_id="015-fail",
-            verdict="NEEDS_REVIEW",
+            verdict="FAIL",
             baseline_commit=head_sha,
             verified_commit=head_sha,
             ac02_status="NEEDS_REVIEW",
@@ -735,9 +735,13 @@ Verified-Commit: abcdef1234567890
         (c_fail / "receipt.md").write_text(c_fail_rc, encoding="utf-8")
 
         rep_fail = get_change_report(self.repo, "015-fail", "CLEAN", head_sha)
+        self.assertEqual(rep_fail.machine_verdict, "FAIL")
+        self.assertEqual(rep_fail.acceptance_blocked_reason, "Acceptance blocked by machine evidence.")
         self.assertEqual(rep_fail.next_action_category, "Blocked State")
         self.assertIn("Machine verification failed", rep_fail.next_action)
         self.assertIn("receipt.md", rep_fail.next_action)
+        self.assertIn("Next Action: [Blocked State]", format_change_detail(rep_fail))
+        self.assertIn("Machine Verdict: FAIL", format_change_detail(rep_fail))
 
         # Phase 4: NEEDS_REVIEW with pending manual review
         c_nr = self.repo / ".goatee" / "changes" / "015-nr"

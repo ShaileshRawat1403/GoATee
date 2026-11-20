@@ -279,7 +279,8 @@ def derive_review_state(
         # - zero Verification Mutations
         # - every manual criterion current state VERIFIED
         clean_machine = (
-            all(r.status == "VERIFIED" for r in receipt.rows if r.criterion_type == "automated")
+            receipt.verdict != "FAIL"
+            and all(r.status == "VERIFIED" for r in receipt.rows if r.criterion_type == "automated")
             and not any(r.status in ("FAILED", "NOT_RUN") for r in receipt.rows if r.criterion_type == "automated")
             and len(receipt.surface_deviations) == 0
             and len(receipt.protected_changes) == 0
@@ -659,6 +660,11 @@ def record_attestation(
     if verified:
         if not criterion_id:
             raise ControlStateError("--verified requires --criterion.")
+        if receipt.verdict == "FAIL":
+            raise ControlStateError(
+                f"Cannot positively attest criterion '{criterion_id}': delivery receipt for '{change_id}' recorded FAIL. "
+                "Positive attestation is prohibited when machine verification fails."
+            )
         if rec_row.criterion_type != "manual" or ac_match.evidence_type != "manual":
             raise ControlStateError(
                 f"Criterion '{criterion_id}' is declared as automated in change contract. "
@@ -844,6 +850,9 @@ def run_interactive_attestation(
                 output_fn("  -> Skipped.")
                 break
             elif choice in ("v", "verify"):
+                if receipt.verdict == "FAIL":
+                    output_fn("  Error: Cannot positively attest criteria because delivery receipt recorded machine failure (Verdict: FAIL). Fix machine failures and re-verify first.")
+                    continue
                 if ac.evidence_type != "manual":
                     output_fn("  Error: Automated criteria cannot be positively attested with 'verify'. Use 'reject' or 'skip'.")
                     continue
@@ -1064,6 +1073,11 @@ def record_multi_attestation(
             )
 
         if obs == "VERIFIED":
+            if receipt.verdict == "FAIL":
+                raise ControlStateError(
+                    f"Cannot positively attest criterion '{c_id}': delivery receipt for '{change_id}' recorded FAIL. "
+                    "Positive attestation is prohibited when machine verification fails."
+                )
             if rec_row.criterion_type != "manual" or ac_match.evidence_type != "manual":
                 raise ControlStateError(
                     f"Criterion '{c_id}' is declared as automated in change contract. "

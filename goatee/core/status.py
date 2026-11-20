@@ -22,7 +22,7 @@ class ReceiptSyntaxError(Exception):
     pass
 
 
-VALID_RECEIPT_VERDICTS: Set[str] = {"PASS", "NEEDS_REVIEW"}
+VALID_RECEIPT_VERDICTS: Set[str] = {"PASS", "NEEDS_REVIEW", "FAIL"}
 VALID_CRITERION_STATUSES: Set[str] = {"VERIFIED", "FAILED", "NEEDS_REVIEW", "NOT_RUN"}
 
 
@@ -523,7 +523,8 @@ def get_change_report(
         acceptance_blocked_reason = None
         if human_review == "PENDING":
             flawed_machine = (
-                any(r.status in ("FAILED", "NOT_RUN") for r in receipt.rows if r.criterion_type == "automated")
+                receipt.verdict == "FAIL"
+                or any(r.status in ("FAILED", "NOT_RUN") for r in receipt.rows if r.criterion_type == "automated")
                 or len(receipt.surface_deviations) > 0
                 or len(receipt.protected_changes) > 0
                 or len(receipt.mutations) > 0

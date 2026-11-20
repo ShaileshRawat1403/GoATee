@@ -965,6 +965,40 @@ Verified-Commit: {verified_commit}
         self.assertIn("Working tree must be clean", str(ctx.exception))
         self.assertFalse((change_dir_sec3 / "review.md").exists())
 
+        # SEC-04: Reject positive human attestation when delivery receipt recorded FAIL
+        change_id_sec4 = "015-sec04"
+        change_dir_sec4, _, _ = self._setup_multi_criterion_change(change_id_sec4)
+
+        # Update receipt to Verdict: FAIL
+        rc_content = (change_dir_sec4 / "receipt.md").read_text(encoding="utf-8")
+        failed_rc = rc_content.replace("Verdict: NEEDS_REVIEW", "Verdict: FAIL")
+        (change_dir_sec4 / "receipt.md").write_text(failed_rc, encoding="utf-8")
+        subprocess.run(["git", "add", str(change_dir_sec4 / "receipt.md")], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", "chore: commit failed receipt"], cwd=self.repo, check=True, capture_output=True)
+
+        with self.assertRaises(ControlStateError) as ctx:
+            record_multi_attestation(
+                repo_root=self.repo,
+                change_id=change_id_sec4,
+                decisions=[("AC-02", "VERIFIED", "Should be rejected on FAIL")],
+            )
+        self.assertIn("recorded FAIL", str(ctx.exception))
+        self.assertIn("Positive attestation is prohibited", str(ctx.exception))
+        self.assertFalse((change_dir_sec4 / "review.md").exists())
+
+        # Also test record_attestation single command fails closed
+        with self.assertRaises(ControlStateError) as ctx:
+            record_attestation(
+                repo_root=self.repo,
+                change_id=change_id_sec4,
+                criterion_id="AC-02",
+                verified=True,
+                rejected=False,
+                note="Should be rejected",
+            )
+        self.assertIn("recorded FAIL", str(ctx.exception))
+        self.assertFalse((change_dir_sec4 / "review.md").exists())
+
 
 if __name__ == "__main__":
     unittest.main()
