@@ -6,7 +6,7 @@ import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple, Union
 
 from goatee.core.models import AcceptanceCriterion, ChangeContract
 from goatee.core.parser import parse_change_contract, ContractSyntaxError
