@@ -341,7 +341,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "VERIFICATION BLOCKED: Working tree must be clean. "
             "Commit the delivered implementation and governing change contract before verification.\n"
             "Uncommitted changes:\n" +
-            "\n".join(f"  {c}" for c in uncommitted),
+            "\n".join(f"  {c}" for c in uncommitted) +
+            f"\n\nPre-flight check: Run 'goatee check' (or 'goatee check {change_id}') to inspect budget compliance of uncommitted changes without committing.",
             file=sys.stderr
         )
         return 1
@@ -438,6 +439,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
             "mutations": result.mutations,
         }
         print(json.dumps(payload, indent=2))
+    elif result.verdict == "FAIL":
+        from goatee.core.verifier import format_failure_diagnostic
+        show_diag = getattr(args, "diagnostics", False)
+        diag_output = format_failure_diagnostic(result, show_details=show_diag)
+        if diag_output:
+            print(diag_output, file=sys.stderr)
 
     if getattr(args, "ci", False):
         from goatee.core.ci import write_github_step_summary
@@ -624,6 +631,17 @@ def cmd_attest(args: argparse.Namespace) -> int:
     from goatee.core.parser import ContractSyntaxError
 
     cwd = Path.cwd()
+
+    if getattr(args, "decision", None):
+        from goatee.core.attest import record_multi_attestation
+        try:
+            count = record_multi_attestation(cwd, change_id, args.decision)
+            print(f"Recorded {count} explicit attestation decision(s) for change '{change_id}' in .goatee/changes/{change_id}/review.md")
+            print("Notice: Commit review.md to preserve these review records in Git history.")
+            return 0
+        except (ControlStateError, ReceiptSyntaxError, ContractSyntaxError) as e:
+            print(f"Error: {e}", file=sys.stderr)
+            return 1
 
     if getattr(args, "interactive", False):
         from goatee.core.attest import run_interactive_attestation
@@ -998,12 +1016,17 @@ class GoateeArgumentParser(argparse.ArgumentParser):
     def parse_args(self, args=None, namespace=None):
         parsed = super().parse_args(args=args, namespace=namespace)
         if getattr(parsed, "command", None) == "attest":
-            if getattr(parsed, "interactive", False):
+            if getattr(parsed, "decision", None):
+                if getattr(parsed, "interactive", False):
+                    self.error("cannot combine --decision with --interactive")
+                if getattr(parsed, "verified", False) or getattr(parsed, "rejected", False):
+                    self.error("cannot combine --decision with --verified or --rejected")
+            elif getattr(parsed, "interactive", False):
                 if getattr(parsed, "verified", False) or getattr(parsed, "rejected", False):
                     self.error("cannot combine --interactive with --verified or --rejected")
             else:
                 if not getattr(parsed, "verified", False) and not getattr(parsed, "rejected", False):
-                    self.error("one of the arguments --verified --rejected is required (or use --interactive)")
+                    self.error("one of the arguments --verified --rejected is required (or use --interactive or --decision)")
                 if not getattr(parsed, "note", None):
                     self.error("the following arguments are required: --note")
         return parsed
@@ -1040,6 +1063,7 @@ def build_parser() -> argparse.ArgumentParser:
     # verify
     p_verify = subparsers.add_parser("verify", help="Execute deterministic verification and compile receipt.md")
     p_verify.add_argument("change_id", nargs="?", help="Identifier of the change to verify (inferred if omitted)")
+    p_verify.add_argument("-d", "--diagnostics", action="store_true", help="Include bounded stdout/stderr excerpts in terminal failure output")
     p_verify.add_argument("--ci", action="store_true", help="CI integration mode: writes summary to GITHUB_STEP_SUMMARY if present")
     p_verify.add_argument("--allow-needs-review", action="store_true", help="Permit exit 0 when automated tests pass but manual review is pending")
     p_verify.add_argument("--json", action="store_true", help="Output verification receipt as JSON to stdout")
@@ -1095,6 +1119,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_attest = subparsers.add_parser("attest", help="Record human attestation into review.md")
     p_attest.add_argument("change_id", nargs="?", help="Identifier of the change to attest (inferred if omitted)")
     p_attest.add_argument("-i", "--interactive", action="store_true", help="Launch interactive attestation wizard")
+    p_attest.add_argument("--decision", action="append", default=[], help="Explicit criterion decision in format <criterion_id>=<VERIFIED|REJECTED>:<note> (repeatable)")
     p_attest.add_argument("--criterion", help="Criterion ID to attest (e.g. AC-11)")
     p_attest.add_argument("--note", help="Review rationale note (required in non-interactive mode)")
     action_grp = p_attest.add_mutually_exclusive_group(required=False)

@@ -287,6 +287,76 @@ Baseline-Commit:
         self.assertIn("Status: FAILED", resp["result"]["content"][0]["text"])
         self.assertIn("Missing '## Intent' section", resp["result"]["content"][0]["text"])
 
+    def test_mcp_structured_budget_and_contract(self):
+        """AC-07: MCP tools provide backward-compatible structured budget results and enriched contract handoff rules."""
+        # 1. Test goatee_get_contract with enriched agent rules and lifecycle hints
+        req_contract = {
+            "jsonrpc": "2.0",
+            "id": 100,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_get_contract",
+                "arguments": {"change_id": "001-mcp"}
+            }
+        }
+        resp_c = process_mcp_message(req_contract, self.repo_root)
+        self.assertIsNotNone(resp_c)
+        self.assertFalse(resp_c["result"]["isError"])
+        contract_data = json.loads(resp_c["result"]["content"][0]["text"])
+
+        # Check enriched agent handoff fields
+        self.assertIn("project_constraints", contract_data)
+        self.assertIsInstance(contract_data["project_constraints"], list)
+        self.assertIn("implementation_rules", contract_data)
+        self.assertIsInstance(contract_data["implementation_rules"], list)
+        self.assertTrue(len(contract_data["implementation_rules"]) >= 4)
+        self.assertIn("Stay strictly within the approved agreement and scope.", contract_data["implementation_rules"])
+        self.assertIn("next_action", contract_data)
+        self.assertIn("next_action_category", contract_data)
+        self.assertEqual(contract_data["next_action_category"], "Machine Action")
+
+        # 2. Test goatee_check_budget structured and backward-compatible content items
+        req_budget = {
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_check_budget",
+                "arguments": {"change_id": "001-mcp"}
+            }
+        }
+        resp_b = process_mcp_message(req_budget, self.repo_root)
+        self.assertIsNotNone(resp_b)
+        self.assertFalse(resp_b["result"]["isError"])
+        contents = resp_b["result"]["content"]
+        self.assertEqual(len(contents), 2)
+        # Content item 0 is human/agent readable summary
+        self.assertEqual(contents[0]["type"], "text")
+        self.assertIn("Pre-Flight Budget Check: PASSED", contents[0]["text"])
+        # Content item 1 is structured JSON
+        self.assertEqual(contents[1]["type"], "text")
+        budget_data = json.loads(contents[1]["text"])
+        self.assertEqual(budget_data["change_id"], "001-mcp")
+        self.assertEqual(budget_data["baseline_commit"], self.baseline_sha)
+        self.assertTrue(budget_data["passed"])
+        self.assertEqual(budget_data["surface_deviations"], [])
+        self.assertEqual(budget_data["protected_changes"], [])
+
+        # 3. Test standardized error with recovery suggestion
+        req_bad = {
+            "jsonrpc": "2.0",
+            "id": 102,
+            "method": "tools/call",
+            "params": {
+                "name": "goatee_check_budget",
+                "arguments": {"change_id": "nonexistent-999"}
+            }
+        }
+        resp_bad = process_mcp_message(req_bad, self.repo_root)
+        self.assertIsNotNone(resp_bad)
+        self.assertTrue(resp_bad["result"]["isError"])
+        self.assertIn("Recovery Suggestion:", resp_bad["result"]["content"][0]["text"])
+
 
 if __name__ == "__main__":
     unittest.main()

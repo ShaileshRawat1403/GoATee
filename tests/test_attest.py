@@ -4,6 +4,7 @@ import hashlib
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,9 +17,13 @@ from goatee.core.attest import (
     format_review_markdown,
     load_and_validate_review,
     normalize_note,
+    parse_decision_argument,
     parse_review_markdown,
     record_attestation,
+    record_multi_attestation,
+    run_interactive_attestation,
 )
+from unittest.mock import patch
 from goatee.core.parser import parse_change_contract
 from goatee.core.status import ControlStateError, parse_receipt
 
@@ -667,6 +672,298 @@ Receipt-SHA256: 1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef
             self.assertEqual(len(record.rows), 1)
             self.assertEqual(record.rows[0].criterion_id, "AC-01")
             self.assertEqual(record.rows[0].note, "Note with a | pipe character")
+
+    def _setup_multi_criterion_change(self, change_id: str) -> tuple[Path, str, str]:
+        """Helper to create and commit a change with multiple criteria (1 automated, 2 manual)."""
+        change_dir = self.repo / ".goatee" / "changes" / change_id
+        change_dir.mkdir(parents=True, exist_ok=True)
+
+        contract_text = f"""# Change: {change_id}
+
+## Intent
+
+Implement multi-criterion feature {change_id}.
+
+## Agreed Scope
+
+### In Scope
+- Multi-criterion support
+
+### Out of Scope
+- Extra features
+
+## Acceptance Criteria
+
+- AC-01: Automated unit test
+  Evidence:
+    type: automated
+    command: python3 -c 'exit(0)'
+    expected: exit 0
+
+- AC-02: Manual security review
+  Evidence:
+    type: manual
+    instruction: Review security controls
+
+- AC-03: Manual UX audit
+  Evidence:
+    type: manual
+    instruction: Audit user interface and CLI experience
+
+## Build Budget
+
+### Expected Surface
+- src/{change_id}.py
+
+### Reuse Strategy
+- stdlib only
+
+Dependency-Policy: No new runtime dependencies
+
+### Blast Radius
+- src/core/
+
+## Contract State
+
+Agreement-Status: APPROVED
+Budget-Status: APPROVED
+Baseline-Commit: {self.base_commit}
+"""
+        (change_dir / "change.md").write_text(contract_text, encoding="utf-8")
+
+        src_dir = self.repo / "src"
+        src_dir.mkdir(parents=True, exist_ok=True)
+        (src_dir / f"{change_id}.py").write_text("# impl\n", encoding="utf-8")
+
+        subprocess.run(["git", "add", "."], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", f"feat: {change_id}"], cwd=self.repo, check=True)
+        verified_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        receipt_text = f"""# Delivery Receipt: {change_id}
+
+Verdict: NEEDS_REVIEW
+Verified-At: 2026-09-21 00:00:00Z
+
+## Commit Provenance
+
+Baseline-Commit: {self.base_commit}
+Verified-Commit: {verified_commit}
+
+## Requirement Coverage Matrix
+
+| Criterion | Type | Declared Verification | Observed Result | Status |
+| :--- | :---: | :--- | :--- | :---: |
+| **AC-01** | automated | `python3 -c 'exit(0)'` | exit 0 (0.01s) | **VERIFIED** |
+| **AC-02** | manual | `Review security controls` | Pending human observation and sign-off | **NEEDS_REVIEW** |
+| **AC-03** | manual | `Audit user interface and CLI experience` | Pending human observation and sign-off | **NEEDS_REVIEW** |
+
+## Build Budget & Surface Analysis
+
+### Expected Changes
+- src/{change_id}.py
+
+### Surface Deviations
+- (none)
+
+### Protected Changes
+- (none)
+
+## Git-Visible Mutation Report
+
+- Zero Git-visible repository mutations detected during verification.
+
+## Diagnostic Excerpt
+
+- No diagnostics recorded (all executed checks clean).
+"""
+        receipt_path = change_dir / "receipt.md"
+        receipt_path.write_text(receipt_text, encoding="utf-8")
+
+        subprocess.run(["git", "add", str(receipt_path)], cwd=self.repo, check=True)
+        subprocess.run(["git", "commit", "-m", f"chore: record receipt for {change_id}"], cwd=self.repo, check=True)
+        receipt_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=self.repo, capture_output=True, text=True, check=True
+        ).stdout.strip()
+
+        return change_dir, verified_commit, receipt_commit
+
+    def test_interactive_attestation_multi_criterion(self):
+        """AC-03: Interactive wizard collects multiple criterion decisions in memory and writes review.md atomically."""
+        change_id = "015-interactive"
+        change_dir, _, _ = self._setup_multi_criterion_change(change_id)
+
+        # 1. Test multi-decision session
+        # Inputs: AC-02 -> v, note; AC-03 -> r, note
+        responses = iter([
+            "v",
+            "Security checks verified and approved",
+            "r",
+            "UX flow rejected due to confusing prompts",
+        ])
+        ret = run_interactive_attestation(
+            repo_root=self.repo,
+            change_id=change_id,
+            input_fn=lambda _: next(responses),
+            output_fn=lambda _: None,
+        )
+        self.assertEqual(ret, 0)
+
+        review_path = change_dir / "review.md"
+        self.assertTrue(review_path.is_file())
+        review = parse_review_markdown(review_path)
+        self.assertEqual(review.verdict, "REJECTED")
+        self.assertEqual(len(review.events), 2)
+        self.assertEqual(review.events[0].criterion_id, "AC-02")
+        self.assertEqual(review.events[0].observation, "VERIFIED")
+        self.assertEqual(review.events[0].note, "Security checks verified and approved")
+        self.assertEqual(review.events[1].criterion_id, "AC-03")
+        self.assertEqual(review.events[1].observation, "REJECTED")
+        self.assertEqual(review.events[1].note, "UX flow rejected due to confusing prompts")
+
+        # 2. Test quitting without decisions results in no review file
+        change_id_quit = "015-quit"
+        change_dir_quit, _, _ = self._setup_multi_criterion_change(change_id_quit)
+        ret_quit = run_interactive_attestation(
+            repo_root=self.repo,
+            change_id=change_id_quit,
+            input_fn=lambda _: "q",
+            output_fn=lambda _: None,
+        )
+        self.assertEqual(ret_quit, 0)
+        self.assertFalse((change_dir_quit / "review.md").exists())
+
+    def test_batch_attestation_explicit_decisions(self):
+        """AC-04: Non-interactive batch attestation processes explicit --decision entries with upfront validation."""
+        # 1. Test parse_decision_argument format parsing
+        cid, v, n = parse_decision_argument("AC-02=VERIFIED:All security controls verified")
+        self.assertEqual(cid, "AC-02")
+        self.assertEqual(v, "VERIFIED")
+        self.assertEqual(n, "All security controls verified")
+
+        cid, v, n = parse_decision_argument('AC-03=REJECTED:"Flaky UI behavior"')
+        self.assertEqual(cid, "AC-03")
+        self.assertEqual(v, "REJECTED")
+        self.assertEqual(n, "Flaky UI behavior")
+
+        with self.assertRaises(ControlStateError):
+            parse_decision_argument("AC-02")
+        with self.assertRaises(ControlStateError):
+            parse_decision_argument("AC-02=INVALID:note")
+        with self.assertRaises(ControlStateError):
+            parse_decision_argument("AC-02=VERIFIED")
+
+        # 2. Test record_multi_attestation with multiple explicit decisions
+        change_id = "015-batch"
+        change_dir, _, _ = self._setup_multi_criterion_change(change_id)
+
+        record_multi_attestation(
+            repo_root=self.repo,
+            change_id=change_id,
+            decisions=[
+                ("AC-02", "VERIFIED", "Security confirmed"),
+                ("AC-03", "VERIFIED", "UX confirmed"),
+            ],
+        )
+
+        review_path = change_dir / "review.md"
+        self.assertTrue(review_path.is_file())
+        review = parse_review_markdown(review_path)
+        self.assertEqual(review.verdict, "ACCEPTED")
+        self.assertEqual(len(review.events), 2)
+        self.assertEqual(review.events[0].criterion_id, "AC-02")
+        self.assertEqual(review.events[0].observation, "VERIFIED")
+        self.assertEqual(review.events[1].criterion_id, "AC-03")
+        self.assertEqual(review.events[1].observation, "VERIFIED")
+
+        # 3. Test CLI integration with repeatable --decision flags
+        change_id_cli = "015-cli-batch"
+        change_dir_cli, _, _ = self._setup_multi_criterion_change(change_id_cli)
+
+        repo_root_code = Path(__file__).resolve().parent.parent
+        env = dict(os.environ, PYTHONPATH=str(repo_root_code))
+        res = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "goatee.cli",
+                "attest",
+                change_id_cli,
+                "--decision",
+                "AC-02=VERIFIED:Security passed",
+                "--decision",
+                "AC-03=REJECTED:UX failed",
+            ],
+            cwd=self.repo,
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        self.assertEqual(res.returncode, 0, f"CLI stderr: {res.stderr}")
+        cli_review = parse_review_markdown(change_dir_cli / "review.md")
+        self.assertEqual(cli_review.verdict, "REJECTED")
+        self.assertEqual(len(cli_review.events), 2)
+
+    def test_attestation_security_regressions(self):
+        """AC-05: Attestation security controls reject automated criterion verification, uncommitted receipts, and malformed decisions."""
+        # SEC-01: Prohibit positive attestation of automated criteria
+        change_id_sec1 = "015-sec01"
+        change_dir_sec1, _, _ = self._setup_multi_criterion_change(change_id_sec1)
+
+        with self.assertRaises(ControlStateError) as ctx:
+            record_multi_attestation(
+                repo_root=self.repo,
+                change_id=change_id_sec1,
+                decisions=[("AC-01", "VERIFIED", "Attempting positive verification on automated criterion")],
+            )
+        self.assertIn("Human attestation with VERIFIED is only permitted for 'type: manual' criteria", str(ctx.exception))
+        self.assertFalse((change_dir_sec1 / "review.md").exists())
+
+        # SEC-02: Reject duplicate or conflicting decisions within the same batch before mutation
+        change_id_sec2 = "015-sec02"
+        change_dir_sec2, _, _ = self._setup_multi_criterion_change(change_id_sec2)
+
+        with self.assertRaises(ControlStateError) as ctx:
+            record_multi_attestation(
+                repo_root=self.repo,
+                change_id=change_id_sec2,
+                decisions=[
+                    ("AC-02", "VERIFIED", "First decision"),
+                    ("AC-02", "REJECTED", "Conflicting second decision"),
+                ],
+            )
+        self.assertIn("Duplicate decision for criterion 'AC-02'", str(ctx.exception))
+        self.assertFalse((change_dir_sec2 / "review.md").exists())
+
+        # SEC-03: Reject attestation if application files or receipt are uncommitted
+        change_id_sec3 = "015-sec03"
+        change_dir_sec3, _, _ = self._setup_multi_criterion_change(change_id_sec3)
+
+        # Modify application file
+        (self.repo / "src" / f"{change_id_sec3}.py").write_text("# dirty edit\n", encoding="utf-8")
+        with self.assertRaises(ControlStateError) as ctx:
+            record_multi_attestation(
+                repo_root=self.repo,
+                change_id=change_id_sec3,
+                decisions=[("AC-02", "VERIFIED", "Valid decision")],
+            )
+        self.assertIn("Working tree must be clean", str(ctx.exception))
+        self.assertFalse((change_dir_sec3 / "review.md").exists())
+
+        # Reset application file
+        subprocess.run(["git", "checkout", "--", "."], cwd=self.repo, check=True)
+
+        # Modify receipt
+        (change_dir_sec3 / "receipt.md").write_text("# dirty receipt\n", encoding="utf-8")
+        with self.assertRaises(ControlStateError) as ctx:
+            record_multi_attestation(
+                repo_root=self.repo,
+                change_id=change_id_sec3,
+                decisions=[("AC-02", "VERIFIED", "Valid decision")],
+            )
+        self.assertIn("Working tree must be clean", str(ctx.exception))
+        self.assertFalse((change_dir_sec3 / "review.md").exists())
 
 
 if __name__ == "__main__":

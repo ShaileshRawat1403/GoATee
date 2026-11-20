@@ -750,7 +750,10 @@ def record_attestation(
         events=all_events,
     )
 
-    review_path.write_text(review_text, encoding="utf-8")
+    import os
+    tmp_path = review_path.with_suffix(".tmp")
+    tmp_path.write_text(review_text, encoding="utf-8")
+    os.replace(tmp_path, review_path)
 
 
 def run_interactive_attestation(
@@ -910,7 +913,10 @@ def run_interactive_attestation(
             rows=rows,
             events=all_events,
         )
-        review_path.write_text(review_text, encoding="utf-8")
+        import os
+        tmp_path = review_path.with_suffix(".tmp")
+        tmp_path.write_text(review_text, encoding="utf-8")
+        os.replace(tmp_path, review_path)
         output_fn(f"\nRecorded {new_events_count} new attestation event(s) in {review_path}.")
         output_fn(f"Updated Human Review Verdict: {verdict}")
         output_fn("Notice: Commit review.md to preserve these review records in Git history.")
@@ -918,3 +924,210 @@ def run_interactive_attestation(
         output_fn("\nNo new attestation events recorded.")
 
     return 0
+
+
+def parse_decision_argument(decision_str: str) -> Tuple[str, str, str]:
+    """Parse single --decision string in format <criterion_id>=<VERIFIED|REJECTED>:<note>.
+    
+    Raises ControlStateError if syntax or format is invalid.
+    """
+    if not isinstance(decision_str, str):
+        raise ControlStateError("--decision argument must be a string.")
+    
+    match = re.match(r"^([a-zA-Z0-9_-]+)=(VERIFIED|REJECTED):(.*)$", decision_str.strip())
+    if not match:
+        raise ControlStateError(
+            f"Invalid --decision format '{decision_str}'. "
+            "Expected format: '<criterion_id>=<VERIFIED|REJECTED>:<note>'."
+        )
+    
+    criterion_id = match.group(1).strip()
+    observation = match.group(2).strip()
+    raw_note = match.group(3).strip()
+    
+    # Strip optional surrounding quotes from note if present
+    if (raw_note.startswith('"') and raw_note.endswith('"')) or (raw_note.startswith("'") and raw_note.endswith("'")):
+        raw_note = raw_note[1:-1]
+        
+    clean_note = normalize_note(raw_note)
+    return criterion_id, observation, clean_note
+
+
+def record_multi_attestation(
+    repo_root: Path,
+    change_id: str,
+    decisions: Sequence[Union[str, Tuple[str, str, str]]]
+) -> int:
+    """Record an explicit batch of human criterion decisions with upfront validation and atomic replacement.
+    
+    Enforces that:
+    1. Working tree outside .goatee/ is clean and receipt.md is committed and clean in HEAD.
+    2. Batch contains no duplicate criterion decisions.
+    3. All decision formats and single-line notes are valid.
+    4. Automated criteria reject positive VERIFIED attestation (only REJECTED permitted).
+    5. All criteria exist in contract and match receipt declared instructions.
+    6. Replays all events in memory to verify state before writing.
+    7. Atomically replaces review.md via temporary file write with zero partial mutation.
+    """
+    if not decisions:
+        raise ControlStateError("No decisions provided in attestation batch.")
+
+    root = find_project_root(repo_root)
+    check_clean_worktree(root)
+
+    change_dir = root / ".goatee" / "changes" / change_id
+    change_md_path = change_dir / "change.md"
+    if not change_md_path.is_file():
+        raise ControlStateError(f"Change '{change_id}' not found.")
+
+    try:
+        contract = parse_change_contract(change_md_path)
+    except ContractSyntaxError as e:
+        raise ControlStateError(f"Malformed contract in '{change_md_path}': {e}")
+
+    receipt, receipt_commit, receipt_sha256 = verify_receipt_prerequisites(change_dir, contract, root)
+    reviewer_name, reviewer_email = get_git_reviewer(root)
+
+    # Check existing review record in Git
+    review_path = change_dir / "review.md"
+    existing_events: List[ReviewEvent] = []
+    if review_path.is_file():
+        rel_review = review_path.relative_to(root)
+        res_track = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(rel_review)],
+            capture_output=True,
+            text=True,
+            cwd=root
+        )
+        if res_track.returncode != 0:
+            raise ControlStateError(
+                f"Review record for '{change_id}' has uncommitted changes. "
+                f"Commit {rel_review} before recording another attestation."
+            )
+        res_diff = subprocess.run(
+            ["git", "diff", "HEAD", "--", str(rel_review)],
+            capture_output=True,
+            text=True,
+            cwd=root
+        )
+        if res_diff.returncode != 0 or res_diff.stdout.strip():
+            raise ControlStateError(
+                f"Review record for '{change_id}' has uncommitted changes. "
+                f"Commit {rel_review} before recording another attestation."
+            )
+
+        existing_review = load_and_validate_review(change_dir, contract, receipt, root)
+        if existing_review:
+            existing_events = list(existing_review.events)
+
+    # 1. Parse decision syntax and detect duplicate criterion entries upfront
+    parsed_decisions: List[Tuple[str, str, str]] = []
+    seen_criteria: Set[str] = set()
+
+    for dec_item in decisions:
+        if isinstance(dec_item, str):
+            c_id, obs, clean_note = parse_decision_argument(dec_item)
+        elif isinstance(dec_item, (tuple, list)) and len(dec_item) == 3:
+            raw_cid, raw_obs, raw_note = dec_item
+            c_id = str(raw_cid).strip()
+            obs = str(raw_obs).strip().upper()
+            if obs not in ("VERIFIED", "REJECTED"):
+                raise ControlStateError(f"Invalid decision verdict '{obs}'. Must be VERIFIED or REJECTED.")
+            clean_note = normalize_note(str(raw_note))
+        else:
+            raise ControlStateError(f"Invalid decision item '{dec_item}'. Expected string or (criterion_id, verdict, note) tuple.")
+
+        if c_id in seen_criteria:
+            raise ControlStateError(
+                f"Duplicate decision for criterion '{c_id}' in decision batch. "
+                "Each criterion may appear at most once per batch."
+            )
+        seen_criteria.add(c_id)
+        parsed_decisions.append((c_id, obs, clean_note))
+
+    # 2. Semantic validation against contract and receipt
+    rec_row_map = {r.criterion_id: r for r in receipt.rows}
+
+    for c_id, obs, clean_note in parsed_decisions:
+        ac_match = next((ac for ac in contract.acceptance_criteria if ac.id == c_id), None)
+        if not ac_match:
+            raise ControlStateError(f"Criterion '{c_id}' not found in change contract '{change_id}'.")
+
+        rec_row = rec_row_map.get(c_id)
+        if not rec_row:
+            raise ControlStateError(f"Criterion '{c_id}' missing from delivery receipt.")
+
+        if ac_match.evidence_type != rec_row.criterion_type:
+            raise ControlStateError(
+                f"Error: Criterion '{c_id}' type differs between change contract and delivery receipt. "
+                "Review cannot continue against inconsistent evidence."
+            )
+
+        if obs == "VERIFIED":
+            if rec_row.criterion_type != "manual" or ac_match.evidence_type != "manual":
+                raise ControlStateError(
+                    f"Criterion '{c_id}' is declared as automated in change contract. "
+                    "Automated criteria must be verified mechanically by 'goatee verify'. "
+                    "Human attestation with VERIFIED is only permitted for 'type: manual' criteria."
+                )
+            if rec_row.status != "NEEDS_REVIEW":
+                raise ControlStateError(
+                    f"Criterion '{c_id}' cannot be positively attested because its machine status is {rec_row.status}. "
+                    "Human attestation may only resolve manual criteria with machine status NEEDS_REVIEW."
+                )
+            clean_declared = rec_row.declared.strip()
+            if clean_declared.startswith("`") and clean_declared.endswith("`") and len(clean_declared) >= 2:
+                unquoted_declared = clean_declared[1:-1].strip()
+            else:
+                unquoted_declared = clean_declared
+
+            contract_instruction = (ac_match.instruction or "").strip()
+            if contract_instruction != clean_declared and contract_instruction != unquoted_declared:
+                raise ControlStateError(
+                    f"Error: Criterion '{c_id}' manual evidence instruction differs from the verified receipt. "
+                    "Human attestation cannot be applied to changed evidence requirements."
+                )
+        elif obs == "REJECTED":
+            # Rejection permitted for both manual and automated criteria
+            pass
+        else:
+            raise ControlStateError(f"Unrecognized observation status '{obs}' for criterion '{c_id}'. Must be VERIFIED or REJECTED.")
+
+    # 3. All decisions valid: construct review events sequentially
+    all_events = list(existing_events)
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+
+    for c_id, obs, clean_note in parsed_decisions:
+        new_event = ReviewEvent(
+            sequence=len(all_events) + 1,
+            attested_at=now_utc,
+            scope="criterion",
+            criterion_id=c_id,
+            observation=obs,
+            reviewer_name=reviewer_name,
+            reviewer_email=reviewer_email,
+            attribution="Git-configured",
+            note=clean_note,
+        )
+        all_events.append(new_event)
+
+    verdict, rows = derive_review_state(contract, receipt, all_events)
+
+    review_text = format_review_markdown(
+        change_id=change_id,
+        verdict=verdict,
+        updated_at=now_utc,
+        verified_commit=receipt.verified_commit,
+        receipt_commit=receipt_commit,
+        receipt_sha256=receipt_sha256,
+        rows=rows,
+        events=all_events,
+    )
+
+    # 4. Atomic file replacement
+    import os
+    tmp_path = review_path.with_suffix(".tmp")
+    tmp_path.write_text(review_text, encoding="utf-8")
+    os.replace(tmp_path, review_path)
+
+    return len(parsed_decisions)

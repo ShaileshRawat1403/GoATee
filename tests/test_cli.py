@@ -1016,6 +1016,49 @@ class TestCLI(unittest.TestCase):
             finally:
                 os.chdir(orig_cwd)
 
+    def test_verify_dirty_worktree_guidance(self):
+        """AC-02: verify on dirty worktree provides actionable guidance to use goatee check."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            p = Path(tmpdir)
+            parser = build_parser()
+            orig_cwd = os.getcwd()
+            os.chdir(tmpdir)
+            try:
+                subprocess.run(["git", "init"], check=True, capture_output=True)
+                subprocess.run(["git", "config", "user.name", "Tester"], check=True)
+                subprocess.run(["git", "config", "user.email", "tester@test.local"], check=True)
+                (p / "README.md").write_text("# Test\n", encoding="utf-8")
+                subprocess.run(["git", "add", "README.md"], check=True)
+                subprocess.run(["git", "commit", "-m", "init"], check=True, capture_output=True)
+
+                parser.parse_args(["init"]).func(parser.parse_args(["init"]))
+                parser.parse_args(["new", "001-dirty"]).func(parser.parse_args(["new", "001-dirty"]))
+
+                # Prepare contract with approved state
+                change_file = p / ".goatee" / "changes" / "001-dirty" / "change.md"
+                content = change_file.read_text(encoding="utf-8")
+                content = content.replace("Agreement-Status: DRAFT", "Agreement-Status: APPROVED")
+                content = content.replace("Budget-Status: DRAFT", "Budget-Status: APPROVED")
+                change_file.write_text(content, encoding="utf-8")
+
+                parser.parse_args(["approve", "001-dirty"]).func(parser.parse_args(["approve", "001-dirty"]))
+
+                # Create uncommitted dirty file
+                (p / "dirty_file.py").write_text("# work in progress", encoding="utf-8")
+
+                stderr_buf = io.StringIO()
+                with patch("sys.stderr", stderr_buf):
+                    rc = parser.parse_args(["verify", "001-dirty"]).func(
+                        parser.parse_args(["verify", "001-dirty"])
+                    )
+
+                self.assertEqual(rc, 1)
+                stderr_text = stderr_buf.getvalue()
+                self.assertIn("VERIFICATION BLOCKED: Working tree must be clean.", stderr_text)
+                self.assertIn("Pre-flight check: Run 'goatee check' (or 'goatee check 001-dirty')", stderr_text)
+            finally:
+                os.chdir(orig_cwd)
+
 
 if __name__ == "__main__":
     unittest.main()

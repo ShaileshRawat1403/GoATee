@@ -12,6 +12,8 @@ from goatee.core.verifier import (
     validate_evidence_declaration,
     verify_change,
     render_receipt_markdown,
+    format_failure_diagnostic,
+    bounded_excerpt,
 )
 
 
@@ -370,6 +372,68 @@ class TestVerifier(unittest.TestCase):
         md = render_receipt_markdown(result, template_path)
         self.assertIn("cat file \\| grep foo", md)
         self.assertIn("result \\| with \\| pipes", md)
+
+    def test_verify_failure_diagnostics_console(self):
+        """AC-01: Terminal failure diagnostics display metadata by default and excerpts only when requested."""
+        from goatee.core.verifier import CriterionResult, VerificationResult
+        from goatee.core.budget import BudgetComparisonResult
+
+        long_diag = "\n".join(f"Error line {i}: detailed stack trace or secret data" for i in range(30))
+        result = VerificationResult(
+            change_id="001-diag-test",
+            baseline_commit="1111111111111111",
+            verified_commit="2222222222222222",
+            budget_result=BudgetComparisonResult(
+                surface_deviations=["extra.py"],
+                protected_changes=[".github/workflows/main.yml"]
+            ),
+            criterion_results=[
+                CriterionResult(
+                    criterion_id="AC-01",
+                    evidence_type="automated",
+                    declared="pytest tests/unit (exit 0)",
+                    observed="exit 1 (0.42s)",
+                    status="FAILED",
+                    diagnostic=long_diag
+                )
+            ],
+            mutations=["Modified: config.json"],
+            verdict="FAIL",
+            verified_at="2026-11-20 08:00:00Z"
+        )
+
+        # 1. Default output: metadata only, excerpts hidden
+        default_out = format_failure_diagnostic(result, show_details=False)
+        self.assertIn("AC-01", default_out)
+        self.assertIn("pytest tests/unit (exit 0)", default_out)
+        self.assertIn("exit 1", default_out)
+        self.assertIn("Surface Deviations (1):", default_out)
+        self.assertIn("extra.py", default_out)
+        self.assertIn("Protected Changes (1):", default_out)
+        self.assertIn(".github/workflows/main.yml", default_out)
+        self.assertIn("Repository Mutations Detected (1):", default_out)
+        self.assertIn("Modified: config.json", default_out)
+        self.assertIn("Detailed command output excerpts hidden by default", default_out)
+        self.assertNotIn("Error line 25", default_out)
+
+        # 2. Detailed output (--diagnostics): excerpts included with bounded truncation
+        detailed_out = format_failure_diagnostic(result, show_details=True, max_lines=15, max_bytes=500)
+        self.assertIn("AC-01", detailed_out)
+        self.assertIn("Diagnostic Excerpt:", detailed_out)
+        self.assertIn("truncated", detailed_out)
+
+        # 3. Clean PASS verdict returns empty diagnostic
+        pass_result = VerificationResult(
+            change_id="001-pass",
+            baseline_commit="1111111111111111",
+            verified_commit="2222222222222222",
+            budget_result=BudgetComparisonResult(),
+            criterion_results=[],
+            mutations=[],
+            verdict="PASS",
+            verified_at="2026-11-20 08:00:00Z"
+        )
+        self.assertEqual(format_failure_diagnostic(pass_result), "")
 
 
 if __name__ == "__main__":
